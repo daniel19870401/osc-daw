@@ -61,6 +61,21 @@ const DEFAULT_DMX_TRACK_SETTINGS = {
   universe: 0,
   channel: 1,
 };
+const DEFAULT_DMX_COLOR_TRACK_SETTINGS = {
+  host: '127.0.0.1',
+  universe: 0,
+  channelStart: 1,
+  fixtureType: 'rgb',
+  mappingChannels: 4,
+  gradientFrom: '#ff0000',
+  gradientTo: '#0000ff',
+  mapping: {
+    r: 1,
+    g: 2,
+    b: 3,
+    w: 4,
+  },
+};
 const TRACK_COLORS = [
   '#5dd8c7',
   '#ffb458',
@@ -115,6 +130,15 @@ const normalizeOscAddress = (address, fallback = '/osc/input') => {
   if (!trimmed) return fallback;
   if (trimmed.startsWith('/')) return trimmed;
   return `/${trimmed}`;
+};
+
+const normalizeDmxFixtureType = (value) => (
+  value === 'rgb' || value === 'rgbw' || value === 'mapping' ? value : 'rgb'
+);
+
+const normalizeMappingChannels = (value) => {
+  const channels = Math.round(toFinite(value, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mappingChannels));
+  return channels === 3 ? 3 : 4;
 };
 
 const buildAutoTrackName = (address, index) => {
@@ -179,19 +203,67 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     next.max = 255;
   }
 
+  if (next.kind === 'dmx-color') {
+    const dmxColor = track.dmxColor || {};
+    const mapping = dmxColor.mapping || {};
+    next.dmxColor = {
+      host:
+        typeof dmxColor.host === 'string' && dmxColor.host.trim()
+          ? dmxColor.host.trim()
+          : DEFAULT_DMX_COLOR_TRACK_SETTINGS.host,
+      universe: clamp(
+        Math.round(toFinite(dmxColor.universe, DEFAULT_DMX_COLOR_TRACK_SETTINGS.universe)),
+        0,
+        32767
+      ),
+      channelStart: clamp(
+        Math.round(toFinite(dmxColor.channelStart, DEFAULT_DMX_COLOR_TRACK_SETTINGS.channelStart)),
+        1,
+        512
+      ),
+      fixtureType: normalizeDmxFixtureType(dmxColor.fixtureType),
+      mappingChannels: normalizeMappingChannels(dmxColor.mappingChannels),
+      gradientFrom: normalizeTrackColor(
+        dmxColor.gradientFrom,
+        DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
+      ),
+      gradientTo: normalizeTrackColor(
+        dmxColor.gradientTo,
+        DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientTo
+      ),
+      mapping: {
+        r: clamp(Math.round(toFinite(mapping.r, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.r)), 1, 512),
+        g: clamp(Math.round(toFinite(mapping.g, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.g)), 1, 512),
+        b: clamp(Math.round(toFinite(mapping.b, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.b)), 1, 512),
+        w: clamp(Math.round(toFinite(mapping.w, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.w)), 1, 512),
+      },
+    };
+    next.min = 0;
+    next.max = 255;
+  }
+
   if (next.kind !== 'osc') {
     next.oscAddress = '';
   }
 
   next.default = clamp(toFinite(next.default, next.min), next.min, next.max);
   next.nodes = (track.nodes || [])
-    .map((node) => ({
-      id: node.id ?? createNodeId(),
-      ...node,
-      t: Math.max(toFinite(node.t, 0), 0),
-      v: clamp(toFinite(node.v, next.default), next.min, next.max),
-      curve: node.curve || 'linear',
-    }))
+    .map((node) => {
+      const normalized = {
+        id: node.id ?? createNodeId(),
+        ...node,
+        t: Math.max(toFinite(node.t, 0), 0),
+        v: clamp(toFinite(node.v, next.default), next.min, next.max),
+        curve: node.curve || 'linear',
+      };
+      if (next.kind === 'dmx-color') {
+        normalized.c = normalizeTrackColor(
+          node.c,
+          next.dmxColor?.gradientFrom || DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
+        );
+      }
+      return normalized;
+    })
     .sort((a, b) => a.t - b.t);
   if (next.kind === 'audio') {
     const audioSrc = typeof next.audio?.src === 'string' ? next.audio.src : '';
@@ -381,12 +453,14 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
       ? `Audio ${String(index).padStart(2, '0')}`
       : kind === 'midi'
         ? `MIDI ${String(index).padStart(2, '0')}`
+        : kind === 'dmx-color'
+          ? `DMX Color ${String(index).padStart(2, '0')}`
         : kind === 'dmx'
           ? `DMX ${String(index).padStart(2, '0')}`
         : `Track ${String(index).padStart(2, '0')}`;
-  const min = kind === 'midi' || kind === 'dmx' ? 0 : 0;
-  const max = kind === 'midi' ? 127 : (kind === 'dmx' ? 255 : 1);
-  const def = kind === 'audio' ? 1 : (kind === 'midi' || kind === 'dmx' ? 0 : 0.5);
+  const min = kind === 'midi' || kind === 'dmx' || kind === 'dmx-color' ? 0 : 0;
+  const max = kind === 'midi' ? 127 : ((kind === 'dmx' || kind === 'dmx-color') ? 255 : 1);
+  const def = kind === 'audio' ? 1 : (kind === 'midi' || kind === 'dmx' || kind === 'dmx-color' ? 0 : 0.5);
   const base = {
     id,
     name,
@@ -452,6 +526,68 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
           1,
           512
         ),
+      },
+    };
+  }
+  if (kind === 'dmx-color') {
+    const dmxColorOptions = options.dmxColor || {};
+    const safeLength = Math.max(Number(view?.length) || 0, 1);
+    const mapping = dmxColorOptions.mapping || {};
+    return {
+      ...base,
+      nodes: [
+        {
+          id: createNodeId(),
+          t: 0,
+          v: 0,
+          c: normalizeTrackColor(
+            dmxColorOptions.gradientFrom,
+            DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
+          ),
+          curve: 'linear',
+        },
+        {
+          id: createNodeId(),
+          t: safeLength,
+          v: 255,
+          c: normalizeTrackColor(
+            dmxColorOptions.gradientTo,
+            DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientTo
+          ),
+          curve: 'linear',
+        },
+      ],
+      dmxColor: {
+        host:
+          typeof dmxColorOptions.host === 'string' && dmxColorOptions.host.trim()
+            ? dmxColorOptions.host.trim()
+            : DEFAULT_DMX_COLOR_TRACK_SETTINGS.host,
+        universe: clamp(
+          Math.round(toFinite(dmxColorOptions.universe, DEFAULT_DMX_COLOR_TRACK_SETTINGS.universe)),
+          0,
+          32767
+        ),
+        channelStart: clamp(
+          Math.round(toFinite(dmxColorOptions.channelStart, DEFAULT_DMX_COLOR_TRACK_SETTINGS.channelStart)),
+          1,
+          512
+        ),
+        fixtureType: normalizeDmxFixtureType(dmxColorOptions.fixtureType),
+        mappingChannels: normalizeMappingChannels(dmxColorOptions.mappingChannels),
+        gradientFrom: normalizeTrackColor(
+          dmxColorOptions.gradientFrom,
+          DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
+        ),
+        gradientTo: normalizeTrackColor(
+          dmxColorOptions.gradientTo,
+          DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientTo
+        ),
+        mapping: {
+          r: clamp(Math.round(toFinite(mapping.r, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.r)), 1, 512),
+          g: clamp(Math.round(toFinite(mapping.g, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.g)), 1, 512),
+          b: clamp(Math.round(toFinite(mapping.b, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.b)), 1, 512),
+          w: clamp(Math.round(toFinite(mapping.w, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mapping.w)), 1, 512),
+        },
       },
     };
   }
@@ -984,12 +1120,18 @@ const reduceProjectState = (state, action) => {
     case 'update-track': {
       const tracks = state.project.tracks.map((track) => {
         if (track.id !== action.id) return track;
+        const dmxColorPatch = action.patch.dmxColor || {};
         return normalizeTrack({
           ...track,
           ...action.patch,
           audio: { ...track.audio, ...action.patch.audio },
           midi: { ...track.midi, ...action.patch.midi },
           dmx: { ...track.dmx, ...action.patch.dmx },
+          dmxColor: {
+            ...track.dmxColor,
+            ...dmxColorPatch,
+            mapping: { ...track.dmxColor?.mapping, ...dmxColorPatch.mapping },
+          },
         });
       });
       return {
@@ -1058,6 +1200,12 @@ const reduceProjectState = (state, action) => {
           ...action.node,
           v: clamp(action.node.v, track.min, track.max),
         };
+        if (track.kind === 'dmx-color') {
+          node.c = normalizeTrackColor(
+            action.node?.c,
+            track.dmxColor?.gradientFrom || DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
+          );
+        }
         return normalizeTrack({
           ...track,
           nodes: [...track.nodes, node],
@@ -1078,6 +1226,14 @@ const reduceProjectState = (state, action) => {
           curve: node?.curve || 'linear',
           t: Math.max(toFinite(node?.t, 0), 0),
           v: clamp(toFinite(node?.v, track.default), track.min, track.max),
+          ...(track.kind === 'dmx-color'
+            ? {
+              c: normalizeTrackColor(
+                node?.c,
+                track.dmxColor?.gradientFrom || DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
+              ),
+            }
+            : {}),
         }));
         return normalizeTrack({
           ...track,

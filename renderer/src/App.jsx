@@ -3,12 +3,13 @@ import TransportBar from './components/TransportBar.jsx';
 import TimelineHeader from './components/TimelineHeader.jsx';
 import TrackLane from './components/TrackLane.jsx';
 import InspectorPanel from './components/InspectorPanel.jsx';
+import InlineColorPicker from './components/InlineColorPicker.jsx';
 import nlInteractiveLogo from './assets/nl-interactive-logo.png';
 import { createInitialState, projectReducer } from './state/projectStore.js';
 import { Decoder as LtcDecoder } from 'linear-timecode';
 import {
   clamp,
-  mapTimeToX,
+  TIMELINE_PADDING,
   TIMELINE_WIDTH,
 } from './utils/timelineMetrics.js';
 
@@ -94,6 +95,133 @@ const formatHmsfTimecode = (seconds, fps) => {
   const { hours, minutes, seconds: secs, frames } = secondsToHmsfParts(seconds, fps);
   const pad = (value) => String(value).padStart(2, '0');
   return `${pad(hours)}:${pad(minutes)}:${pad(secs)}.${pad(frames)}`;
+};
+
+const HEX_COLOR_RE = /^#([0-9a-f]{6})$/i;
+
+const clampByte = (value) => clamp(Math.round(Number(value) || 0), 0, 255);
+
+const parseHexColor = (value, fallback = '#000000') => {
+  const input = typeof value === 'string' && HEX_COLOR_RE.test(value) ? value : fallback;
+  const match = HEX_COLOR_RE.exec(input);
+  const hex = match ? match[1] : '000000';
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+  };
+};
+
+const rgbToHex = (rgb) => (
+  `#${[rgb.r, rgb.g, rgb.b].map((value) => clampByte(value).toString(16).padStart(2, '0')).join('')}`
+);
+
+const lerpColor = (from, to, t) => {
+  const ratio = clamp(Number(t) || 0, 0, 1);
+  return {
+    r: clampByte(from.r + (to.r - from.r) * ratio),
+    g: clampByte(from.g + (to.g - from.g) * ratio),
+    b: clampByte(from.b + (to.b - from.b) * ratio),
+  };
+};
+
+const rgbToRgbw = (rgb) => {
+  const white = Math.min(rgb.r, rgb.g, rgb.b);
+  return {
+    r: clampByte(rgb.r - white),
+    g: clampByte(rgb.g - white),
+    b: clampByte(rgb.b - white),
+    w: clampByte(white),
+  };
+};
+
+const dmxColorNodeHex = (track, node) => {
+  if (!track || track.kind !== 'dmx-color') return '#000000';
+  if (node && typeof node.c === 'string' && HEX_COLOR_RE.test(node.c)) return node.c.toLowerCase();
+  return dmxColorValueToHex(track, node?.v ?? track.default);
+};
+
+const sampleDmxColorHexAtTime = (track, time) => {
+  if (!track || track.kind !== 'dmx-color') return '#000000';
+  const nodes = Array.isArray(track.nodes) ? track.nodes : [];
+  if (!nodes.length) return dmxColorValueToHex(track, track.default);
+  const sorted = [...nodes].sort((a, b) => a.t - b.t);
+  if (time <= sorted[0].t) return dmxColorNodeHex(track, sorted[0]);
+  if (time >= sorted[sorted.length - 1].t) return dmxColorNodeHex(track, sorted[sorted.length - 1]);
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (time < a.t || time > b.t) continue;
+    if (Math.abs(b.t - a.t) < 1e-9) return dmxColorNodeHex(track, b);
+    const ratio = clamp((time - a.t) / (b.t - a.t), 0, 1);
+    const aRgb = parseHexColor(dmxColorNodeHex(track, a), '#000000');
+    const bRgb = parseHexColor(dmxColorNodeHex(track, b), '#000000');
+    return rgbToHex(lerpColor(aRgb, bRgb, ratio));
+  }
+  return dmxColorNodeHex(track, sorted[sorted.length - 1]);
+};
+
+const resolveDmxColorWrites = (track, time) => {
+  if (track.kind !== 'dmx-color') return [];
+  const cfg = track.dmxColor || {};
+  const fixtureType = cfg.fixtureType === 'rgbw' || cfg.fixtureType === 'mapping' ? cfg.fixtureType : 'rgb';
+  const mappingChannels = Number(cfg.mappingChannels) === 3 ? 3 : 4;
+  const start = clamp(Math.round(Number(cfg.channelStart) || 1), 1, 512);
+  const hexColor = sampleDmxColorHexAtTime(track, time);
+  const rgb = parseHexColor(hexColor, '#000000');
+  const rgbw = rgbToRgbw(rgb);
+  const writes = [];
+  if (fixtureType === 'rgb') {
+    writes.push([start, rgb.r], [start + 1, rgb.g], [start + 2, rgb.b]);
+    return writes;
+  }
+  if (fixtureType === 'rgbw') {
+    writes.push([start, rgbw.r], [start + 1, rgbw.g], [start + 2, rgbw.b], [start + 3, rgbw.w]);
+    return writes;
+  }
+  const mapping = cfg.mapping || {};
+  writes.push(
+    [start + (clamp(Math.round(Number(mapping.r) || 1), 1, 512) - 1), mappingChannels === 3 ? rgb.r : rgbw.r],
+    [start + (clamp(Math.round(Number(mapping.g) || 2), 1, 512) - 1), mappingChannels === 3 ? rgb.g : rgbw.g],
+    [start + (clamp(Math.round(Number(mapping.b) || 3), 1, 512) - 1), mappingChannels === 3 ? rgb.b : rgbw.b],
+  );
+  if (mappingChannels === 4) {
+    writes.push([start + (clamp(Math.round(Number(mapping.w) || 4), 1, 512) - 1), rgbw.w]);
+  }
+  return writes;
+};
+
+const dmxColorValueToHex = (track, value) => {
+  if (!track || track.kind !== 'dmx-color') return '#000000';
+  const cfg = track.dmxColor || {};
+  const min = Number.isFinite(track.min) ? track.min : 0;
+  const max = Number.isFinite(track.max) ? track.max : 255;
+  const ratio = clamp((Number(value) - min) / Math.max(max - min, 0.000001), 0, 1);
+  const from = parseHexColor(cfg.gradientFrom, '#ff0000');
+  const to = parseHexColor(cfg.gradientTo, '#0000ff');
+  return rgbToHex(lerpColor(from, to, ratio));
+};
+
+const dmxColorHexToValue = (track, hexColor) => {
+  if (!track || track.kind !== 'dmx-color') return Number(track?.default) || 0;
+  const cfg = track.dmxColor || {};
+  const from = parseHexColor(cfg.gradientFrom, '#ff0000');
+  const to = parseHexColor(cfg.gradientTo, '#0000ff');
+  const target = parseHexColor(hexColor, '#000000');
+  const dr = to.r - from.r;
+  const dg = to.g - from.g;
+  const db = to.b - from.b;
+  const length2 = dr * dr + dg * dg + db * db;
+  const ratio = length2 < 1e-6
+    ? 0
+    : clamp(
+      ((target.r - from.r) * dr + (target.g - from.g) * dg + (target.b - from.b) * db) / length2,
+      0,
+      1
+    );
+  const min = Number.isFinite(track.min) ? track.min : 0;
+  const max = Number.isFinite(track.max) ? track.max : 255;
+  return clamp(min + (max - min) * ratio, min, max);
 };
 
 export default function App() {
@@ -1884,21 +2012,37 @@ export default function App() {
       const currentTime = playheadRef.current;
 
       project.tracks.forEach((track) => {
-        if (track.kind !== 'dmx') return;
-        if (!isTrackEnabled(track, 'dmx')) return;
-        const host = typeof track.dmx?.host === 'string' && track.dmx.host.trim()
-          ? track.dmx.host.trim()
-          : '127.0.0.1';
-        const universe = clamp(Math.round(Number(track.dmx?.universe) || 0), 0, 32767);
-        const channel = clamp(Math.round(Number(track.dmx?.channel) || 1), 1, 512);
-        const value = clamp(Math.round(sampleTrackValue(track, currentTime)), 0, 255);
+        if (track.kind !== 'dmx' && track.kind !== 'dmx-color') return;
+        if (!isTrackEnabled(track, track.kind)) return;
+
+        const host = track.kind === 'dmx-color'
+          ? (
+            typeof track.dmxColor?.host === 'string' && track.dmxColor.host.trim()
+              ? track.dmxColor.host.trim()
+              : '127.0.0.1'
+          )
+          : (
+            typeof track.dmx?.host === 'string' && track.dmx.host.trim()
+              ? track.dmx.host.trim()
+              : '127.0.0.1'
+          );
+        const universe = track.kind === 'dmx-color'
+          ? clamp(Math.round(Number(track.dmxColor?.universe) || 0), 0, 32767)
+          : clamp(Math.round(Number(track.dmx?.universe) || 0), 0, 32767);
+        const sampled = sampleTrackValue(track, currentTime);
+        const writes = track.kind === 'dmx-color'
+          ? resolveDmxColorWrites(track, currentTime)
+          : [[clamp(Math.round(Number(track.dmx?.channel) || 1), 1, 512), clamp(Math.round(sampled), 0, 255)]];
         const key = `${host}|${universe}`;
         let group = groups.get(key);
         if (!group) {
           group = { host, universe, data: new Uint8Array(512) };
           groups.set(key, group);
         }
-        group.data[channel - 1] = value;
+        writes.forEach(([channel, value]) => {
+          if (!Number.isFinite(channel) || channel < 1 || channel > 512) return;
+          group.data[channel - 1] = clamp(Math.round(Number(value) || 0), 0, 255);
+        });
       });
 
       const sequenceMap = artNetSequenceRef.current;
@@ -2339,7 +2483,12 @@ export default function App() {
           const nodeSet = new Set(selectedNodeContext.nodeIds);
           const nodes = sourceTrack.nodes
             .filter((node) => nodeSet.has(node.id))
-            .map((node) => ({ t: node.t, v: node.v, curve: node.curve || 'linear' }))
+            .map((node) => ({
+              t: node.t,
+              v: node.v,
+              c: node.c,
+              curve: node.curve || 'linear',
+            }))
             .sort((a, b) => a.t - b.t);
           if (!nodes.length) return;
           clipboardRef.current = {
@@ -2404,6 +2553,7 @@ export default function App() {
           const nodes = copiedNodes.map((node) => ({
             t: clamp(playhead + ((Number(node.t) || 0) - baseTime), 0, project.view.length),
             v: Number(node.v) || 0,
+            c: node.c,
             curve: node.curve || 'linear',
           }));
           dispatch({ type: 'add-nodes', id: targetTrack.id, nodes });
@@ -2440,7 +2590,11 @@ export default function App() {
       }
       if (withCommand && key === 'd') {
         event.preventDefault();
-        dispatch({ type: 'add-track', kind: 'dmx' });
+        if (event.shiftKey) {
+          dispatch({ type: 'add-track', kind: 'dmx-color' });
+        } else {
+          dispatch({ type: 'add-track', kind: 'dmx' });
+        }
         return;
       }
       if (event.repeat) return;
@@ -2738,13 +2892,28 @@ export default function App() {
     });
   }, []);
 
-  const handleEditNode = (trackId, nodeId, value) => {
+  const handleEditNode = (trackId, nodeId, value, mode = 'value', colorHex = null) => {
     const track = project.tracks.find((item) => item.id === trackId);
     if (track?.kind === 'audio') return;
     const numeric = Number(value);
+    if (mode === 'color' && track?.kind === 'dmx-color') {
+      const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+      const fallbackColor = typeof node?.c === 'string' && HEX_COLOR_RE.test(node.c)
+        ? node.c
+        : dmxColorValueToHex(track, Number.isFinite(numeric) ? numeric : track.default);
+      const color = typeof colorHex === 'string' && HEX_COLOR_RE.test(colorHex) ? colorHex : fallbackColor;
+      setEditingNode({
+        trackId,
+        nodeId,
+        mode: 'color',
+        color: color.toLowerCase(),
+      });
+      return;
+    }
     setEditingNode({
       trackId,
       nodeId,
+      mode: 'value',
       value: Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00',
     });
   };
@@ -2901,6 +3070,24 @@ export default function App() {
 
   const handleSaveNodeValue = () => {
     if (!editingNode) return;
+    if (editingNode.mode === 'color') {
+      const track = project.tracks.find((item) => item.id === editingNode.trackId);
+      const safeColor = typeof editingNode.color === 'string' && HEX_COLOR_RE.test(editingNode.color)
+        ? editingNode.color
+        : '#000000';
+      const value = dmxColorHexToValue(track, safeColor);
+      if (Number.isFinite(value)) {
+        const rounded = Math.round(value * 100) / 100;
+        dispatch({
+          type: 'update-node',
+          id: editingNode.trackId,
+          nodeId: editingNode.nodeId,
+          patch: { v: rounded, c: safeColor.toLowerCase() },
+        });
+      }
+      setEditingNode(null);
+      return;
+    }
     const value = Number(editingNode.value);
     if (Number.isFinite(value)) {
       const rounded = Math.round(value * 100) / 100;
@@ -2977,10 +3164,13 @@ export default function App() {
   };
 
   const playheadX = useMemo(() => {
-    const clamped = clamp(playhead, project.view.start, project.view.end);
-    const x = mapTimeToX(clamped, project.view);
-    return (x / TIMELINE_WIDTH) * 100;
-  }, [playhead, project.view.start, project.view.end]);
+    const start = Number(project.view.start) || 0;
+    const end = Number(project.view.end) || start + 1;
+    const span = Math.max(end - start, 0.0001);
+    const clamped = clamp(playhead, start, end);
+    const width = Math.max(Number(timelineWidth) || TIMELINE_WIDTH, TIMELINE_PADDING * 2 + 1);
+    return ((clamped - start) / span) * (width - 2 * TIMELINE_PADDING) + TIMELINE_PADDING;
+  }, [playhead, project.view.start, project.view.end, timelineWidth]);
 
   const zoomTime = (direction) => {
     dispatch({ type: 'zoom-time', direction, center: playhead });
@@ -3170,7 +3360,9 @@ export default function App() {
 
   const openMultiAddDialog = (kind) => {
     setIsAddTrackMenuOpen(false);
-    const safeKind = kind === 'audio' || kind === 'midi' || kind === 'dmx' ? kind : 'osc';
+    const safeKind = kind === 'audio' || kind === 'midi' || kind === 'dmx' || kind === 'dmx-color'
+      ? kind
+      : 'osc';
     const selectedMidiOutputId =
       typeof project.midi?.outputId === 'string' && project.midi.outputId
         ? project.midi.outputId
@@ -3185,13 +3377,19 @@ export default function App() {
       dmxHost: '127.0.0.1',
       dmxUniverse: '0',
       dmxChannel: '1',
+      dmxColorFixtureType: 'rgb',
+      dmxColorMappingChannels: '4',
+      dmxColorInterval: '3',
     });
   };
 
   const handleConfirmMultiAdd = () => {
     if (!canConfirmMultiAdd || !multiAddDialog) return;
     const safeKind =
-      multiAddDialog.kind === 'audio' || multiAddDialog.kind === 'midi' || multiAddDialog.kind === 'dmx'
+      multiAddDialog.kind === 'audio'
+      || multiAddDialog.kind === 'midi'
+      || multiAddDialog.kind === 'dmx'
+      || multiAddDialog.kind === 'dmx-color'
         ? multiAddDialog.kind
         : 'osc';
     const count = clamp(multiAddCount, 1, 256);
@@ -3212,6 +3410,56 @@ export default function App() {
           },
         },
       }));
+      dispatch({ type: 'add-tracks', items });
+      setMultiAddDialog(null);
+      return;
+    }
+
+    if (safeKind === 'dmx-color') {
+      const host = typeof multiAddDialog.dmxHost === 'string' && multiAddDialog.dmxHost.trim()
+        ? multiAddDialog.dmxHost.trim()
+        : '127.0.0.1';
+      let universe = clamp(Math.round(Number(multiAddDialog.dmxUniverse) || 0), 0, 32767);
+      const baseChannel = clamp(Math.round(Number(multiAddDialog.dmxChannel) || 1), 1, 512);
+      let currentChannel = baseChannel;
+      const fixtureType =
+        multiAddDialog.dmxColorFixtureType === 'rgbw' || multiAddDialog.dmxColorFixtureType === 'mapping'
+          ? multiAddDialog.dmxColorFixtureType
+          : 'rgb';
+      const mappingChannels = Number(multiAddDialog.dmxColorMappingChannels) === 3 ? 3 : 4;
+      const fixtureChannels = fixtureType === 'rgb' ? 3 : (fixtureType === 'rgbw' ? 4 : mappingChannels);
+      const intervalChannels = clamp(
+        Math.round(Number(multiAddDialog.dmxColorInterval) || fixtureChannels),
+        1,
+        512
+      );
+      const items = Array.from({ length: count }, () => {
+        if (currentChannel + fixtureChannels - 1 > 512) {
+          universe = clamp(universe + 1, 0, 32767);
+          currentChannel = baseChannel;
+        }
+        if (currentChannel + fixtureChannels - 1 > 512) {
+          currentChannel = 1;
+        }
+        const item = {
+          kind: 'dmx-color',
+          options: {
+            dmxColor: {
+              host,
+              universe,
+              channelStart: currentChannel,
+              fixtureType,
+              mappingChannels,
+            },
+          },
+        };
+        currentChannel += intervalChannels;
+        if (currentChannel + fixtureChannels - 1 > 512) {
+          universe = clamp(universe + 1, 0, 32767);
+          currentChannel = baseChannel;
+        }
+        return item;
+      });
       dispatch({ type: 'add-tracks', items });
       setMultiAddDialog(null);
       return;
@@ -3298,6 +3546,7 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + A</kbd><span>Add Audio track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + M</kbd><span>Add MIDI track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + D</kbd><span>Add DMX track</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + D</kbd><span>Add DMX Color track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + C</kbd><span>Copy selected track(s), or selected node(s)</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + V</kbd><span>Paste track(s), or paste node(s) at playhead</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Z</kbd><span>Undo</span></div>
@@ -3315,9 +3564,10 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Right Click Cue</kbd><span>Edit or delete cue</span></div>
                 <div className="help-shortcuts__row"><kbd>Double Click Composition</kbd><span>Rename composition</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Composition</kbd><span>Reorder compositions</span></div>
-                <div className="help-shortcuts__row"><kbd>Double Click Node</kbd><span>Edit node value</span></div>
+                <div className="help-shortcuts__row"><kbd>Alt/Option + Click Track +</kbd><span>Open Multi Add menu (add multiple tracks)</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click Node</kbd><span>Edit node value / color</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Node</kbd><span>Move node in time/value</span></div>
-                <div className="help-shortcuts__row"><kbd>Alt + Drag Node</kbd><span>Snap node to cue guide</span></div>
+                <div className="help-shortcuts__row"><kbd>Alt/Option + Drag Node</kbd><span>Snap node to nearest cue</span></div>
                 <div className="help-shortcuts__row"><kbd>Right Click Node</kbd><span>Change node curve mode</span></div>
                 <div className="help-shortcuts__row"><kbd>Color Swatch</kbd><span>Apply color to selected track group</span></div>
                 <div className="help-shortcuts__row"><kbd>Shift + Click Track</kbd><span>Select track range (anchor to clicked track)</span></div>
@@ -3781,7 +4031,9 @@ export default function App() {
                     ? 'Add Multi MIDI'
                     : multiAddDialog.kind === 'dmx'
                       ? 'Add Multi DMX'
-                    : 'Add Multi OSC'}
+                      : multiAddDialog.kind === 'dmx-color'
+                        ? 'Add Multi DMX Color'
+                      : 'Add Multi OSC'}
               </div>
             </div>
             <div className="modal__content">
@@ -3807,7 +4059,7 @@ export default function App() {
                   }}
                 />
               </div>
-              {multiAddDialog.kind === 'dmx' && (
+              {(multiAddDialog.kind === 'dmx' || multiAddDialog.kind === 'dmx-color') && (
                 <>
                   <div className="field">
                     <label>Art-Net IP</label>
@@ -3858,8 +4110,74 @@ export default function App() {
                       />
                     </div>
                   </div>
+                  {multiAddDialog.kind === 'dmx-color' && (
+                    <>
+                      <div className="field">
+                        <label>Fixture</label>
+                        <select
+                          className="input"
+                          value={
+                            multiAddDialog.dmxColorFixtureType === 'rgbw'
+                            || multiAddDialog.dmxColorFixtureType === 'mapping'
+                              ? multiAddDialog.dmxColorFixtureType
+                              : 'rgb'
+                          }
+                          onChange={(event) =>
+                            setMultiAddDialog({
+                              ...multiAddDialog,
+                              dmxColorFixtureType:
+                                event.target.value === 'rgbw' || event.target.value === 'mapping'
+                                  ? event.target.value
+                                  : 'rgb',
+                            })
+                          }
+                        >
+                          <option value="rgb">RGB</option>
+                          <option value="rgbw">RGBW</option>
+                          <option value="mapping">Channel Mapping</option>
+                        </select>
+                      </div>
+                      {multiAddDialog.dmxColorFixtureType === 'mapping' && (
+                        <div className="field">
+                          <label>RGB Mapping</label>
+                          <select
+                            className="input"
+                            value={Number(multiAddDialog.dmxColorMappingChannels) === 3 ? '3' : '4'}
+                            onChange={(event) =>
+                              setMultiAddDialog({
+                                ...multiAddDialog,
+                                dmxColorMappingChannels: event.target.value === '3' ? '3' : '4',
+                              })
+                            }
+                          >
+                            <option value="3">3 Channels (RGB)</option>
+                            <option value="4">4 Channels (RGBW)</option>
+                          </select>
+                        </div>
+                      )}
+                      <div className="field">
+                        <label>Interval Channels</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="1"
+                          max="512"
+                          step="1"
+                          value={multiAddDialog.dmxColorInterval}
+                          onChange={(event) =>
+                            setMultiAddDialog({
+                              ...multiAddDialog,
+                              dmxColorInterval: event.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
                   <div className="field__hint">
-                    DMX channels will auto-increment by track.
+                    {multiAddDialog.kind === 'dmx-color'
+                      ? 'DMX Color uses Interval Channels for each track. If current universe overflows, auto jumps to next universe.'
+                      : 'Channel start will auto-increment by track.'}
                   </div>
                 </>
               )}
@@ -3967,20 +4285,41 @@ export default function App() {
         <div className="modal" role="dialog" aria-modal="true">
           <div className="modal__card">
             <div className="modal__header">
-              <div className="label">Edit Node Value</div>
+              <div className="label">
+                {editingNode.mode === 'color' ? 'Edit Node Color' : 'Edit Node Value'}
+              </div>
               <button className="btn btn--ghost" onClick={() => setEditingNode(null)}>Close</button>
             </div>
             <div className="modal__content">
-              <div className="field">
-                <label>Value</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  value={editingNode.value}
-                  onChange={(event) => setEditingNode({ ...editingNode, value: event.target.value })}
-                />
-              </div>
+              {editingNode.mode === 'color' ? (
+                <div className="field">
+                  <label>Color</label>
+                  <InlineColorPicker
+                    value={
+                      typeof editingNode.color === 'string' && HEX_COLOR_RE.test(editingNode.color)
+                        ? editingNode.color
+                        : '#000000'
+                    }
+                    onChange={(nextColor) => {
+                      setEditingNode((prev) => {
+                        if (!prev) return prev;
+                        return { ...prev, color: String(nextColor || '#000000').toLowerCase() };
+                      });
+                    }}
+                  />
+                </div>
+              ) : (
+                <div className="field">
+                  <label>Value</label>
+                  <input
+                    className="input"
+                    type="number"
+                    step="0.01"
+                    value={editingNode.value}
+                    onChange={(event) => setEditingNode({ ...editingNode, value: event.target.value })}
+                  />
+                </div>
+              )}
               <div className="modal__actions">
                 <button className="btn btn--ghost" onClick={() => setEditingNode(null)}>Cancel</button>
                 <button className="btn" onClick={handleSaveNodeValue}>Save</button>
@@ -4206,6 +4545,8 @@ export default function App() {
                   <div className="tracks-add-wrap">
                     <button
                       className="btn btn--tiny btn--symbol"
+                      title="Add track (hold Alt/Option for Multi Add menu)"
+                      aria-label="Add track. Hold Alt or Option for multi add menu."
                       onClick={(event) => {
                         event.stopPropagation();
                         const mode = event.altKey ? 'multi' : 'single';
@@ -4276,6 +4617,19 @@ export default function App() {
                           }}
                         >
                           {addTrackMenuMode === 'multi' ? 'Add Multi DMX' : 'Add DMX'}
+                        </button>
+                        <button
+                          className="tracks-add-menu__item"
+                          onClick={() => {
+                            if (addTrackMenuMode === 'multi') {
+                              openMultiAddDialog('dmx-color');
+                              return;
+                            }
+                            dispatch({ type: 'add-track', kind: 'dmx-color' });
+                            setIsAddTrackMenuOpen(false);
+                          }}
+                        >
+                          {addTrackMenuMode === 'multi' ? 'Add Multi DMX Color' : 'Add DMX Color'}
                         </button>
                       </div>
                     )}
@@ -4537,6 +4891,36 @@ export default function App() {
                               </>
                             )
                           )}
+                          {track.kind === 'dmx-color' && (
+                            trackInfoDensity === 'full' ? (
+                              <>
+                                <span>DMX Color Track</span>
+                                <span>
+                                  U{Math.max(0, Math.min(32767, Math.round(Number(track.dmxColor?.universe) || 0)))}
+                                  {' '}
+                                  ChStart {Math.max(1, Math.min(512, Math.round(Number(track.dmxColor?.channelStart) || 1)))}
+                                  {' '}
+                                  {(track.dmxColor?.fixtureType === 'rgbw' || track.dmxColor?.fixtureType === 'mapping'
+                                    ? track.dmxColor.fixtureType
+                                    : 'rgb').toUpperCase()}
+                                </span>
+                                <span className="track-row__osc">
+                                  Art-Net {typeof track.dmxColor?.host === 'string' && track.dmxColor.host.trim()
+                                    ? track.dmxColor.host.trim()
+                                    : '127.0.0.1'}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span>DMX Color Track</span>
+                                <span>
+                                  U{Math.max(0, Math.min(32767, Math.round(Number(track.dmxColor?.universe) || 0)))}
+                                  {' '}
+                                  ChStart {Math.max(1, Math.min(512, Math.round(Number(track.dmxColor?.channelStart) || 1)))}
+                                </span>
+                              </>
+                            )
+                          )}
                         </div>
                       )}
                       <div className="track-row__controls">
@@ -4553,6 +4937,8 @@ export default function App() {
                                 ? 'Solo MIDI track output'
                                 : track.kind === 'dmx'
                                   ? 'Solo DMX track output'
+                                : track.kind === 'dmx-color'
+                                  ? 'Solo DMX Color track output'
                                 : 'Solo OSC track output'
                           }
                         >
@@ -4571,6 +4957,8 @@ export default function App() {
                                 ? 'Mute MIDI track output'
                                 : track.kind === 'dmx'
                                   ? 'Mute DMX track output'
+                                : track.kind === 'dmx-color'
+                                  ? 'Mute DMX Color track output'
                                 : 'Mute OSC track output'
                           }
                         >
@@ -4602,7 +4990,7 @@ export default function App() {
                 ))}
                 <div
                   className={`playhead-line ${isPlaying ? 'is-active' : ''}`}
-                  style={{ left: `${playheadX}%` }}
+                  style={{ left: `${playheadX}px` }}
                 />
               </div>
             </div>

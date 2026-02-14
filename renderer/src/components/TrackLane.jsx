@@ -1,5 +1,6 @@
 import React, { memo, useMemo } from 'react';
 import NodeEditor from './NodeEditor.jsx';
+import DmxColorEditor from './DmxColorEditor.jsx';
 
 function TrackLane({
   track,
@@ -17,6 +18,7 @@ function TrackLane({
   cues = [],
 }) {
   const isAudio = track.kind === 'audio';
+  const isDmxColor = track.kind === 'dmx-color';
   const trackColor = typeof track.color === 'string' ? track.color : '#5dd8c7';
   const peaks = Array.isArray(audioWaveform?.peaks)
     ? audioWaveform.peaks
@@ -52,7 +54,7 @@ function TrackLane({
 
   return (
     <div
-      className={`track-lane ${isSelected ? 'is-selected' : ''} ${isAudio ? 'track-lane--audio' : ''}`}
+      className={`track-lane ${isSelected ? 'is-selected' : ''} ${isAudio ? 'track-lane--audio' : ''} ${isDmxColor ? 'track-lane--dmx-color' : ''}`}
       style={{ height, '--track-accent': trackColor }}
       onClick={() => onSelect(track.id)}
       role="button"
@@ -87,6 +89,21 @@ function TrackLane({
             </div>
           )}
         </div>
+      ) : isDmxColor ? (
+        <DmxColorEditor
+          track={track}
+          view={view}
+          height={height}
+          width={timelineWidth}
+          accentColor={trackColor}
+          suspendRendering={suspendRendering}
+          isTrackSelected={isSelected}
+          cues={cues}
+          onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
+          onAddNode={(node) => onAddNode(track.id, node)}
+          onEditNode={(nodeId, value, mode, colorHex) => onEditNode(track.id, nodeId, value, mode, colorHex)}
+          onSelectionChange={onSelectionChange}
+        />
       ) : (
         <NodeEditor
           track={track}

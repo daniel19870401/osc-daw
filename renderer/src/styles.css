@@ -973,6 +973,10 @@ body {
   overflow: hidden;
 }
 
+.track-lane--dmx-color {
+  overflow: hidden;
+}
+
 .audio-lane {
   width: 100%;
   height: 100%;
@@ -1011,6 +1015,70 @@ body {
   width: 100%;
   height: 100%;
   position: relative;
+}
+
+.dmx-color-editor-wrap {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.dmx-color-editor {
+  width: 100%;
+  height: 100%;
+}
+
+.dmx-color-editor__bg {
+  fill: rgba(13, 17, 26, 0.65);
+  stroke: rgba(39, 48, 66, 0.7);
+  stroke-width: 1;
+}
+
+.dmx-color-editor__grid {
+  stroke: rgba(39, 48, 66, 0.45);
+  stroke-width: 1;
+}
+
+.dmx-color-editor__segment {
+  opacity: 0.98;
+}
+
+.dmx-color-editor__segment.is-draggable {
+  cursor: grab;
+}
+
+.dmx-color-editor__segment.is-draggable:active {
+  cursor: grabbing;
+}
+
+.dmx-color-editor__stop-line {
+  stroke: rgba(255, 255, 255, 0.3);
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.dmx-color-editor__snap {
+  stroke: rgba(93, 216, 199, 0.95);
+  stroke-width: 1.4;
+}
+
+.dmx-color-editor__stop-handle {
+  stroke: rgba(255, 255, 255, 0.42);
+  stroke-width: 1;
+}
+
+.dmx-color-editor__stop {
+  cursor: ew-resize;
+}
+
+.dmx-color-editor__stop.is-selected .dmx-color-editor__stop-line {
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 1.6;
+}
+
+.dmx-color-editor__stop.is-selected .dmx-color-editor__stop-handle {
+  stroke: rgba(255, 255, 255, 1);
+  stroke-width: 1.4;
 }
 
 .node-editor {
@@ -1185,6 +1253,97 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.inline-color-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inline-color-picker__square {
+  position: relative;
+  height: 170px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  overflow: hidden;
+  background: var(--picker-hue, #ff0000);
+  cursor: crosshair;
+}
+
+.inline-color-picker__white,
+.inline-color-picker__black {
+  position: absolute;
+  inset: 0;
+}
+
+.inline-color-picker__white {
+  background: linear-gradient(to right, #fff 0%, rgba(255, 255, 255, 0) 100%);
+}
+
+.inline-color-picker__black {
+  background: linear-gradient(to top, #000 0%, rgba(0, 0, 0, 0) 100%);
+}
+
+.inline-color-picker__target {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.inline-color-picker__hue {
+  position: relative;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  cursor: ew-resize;
+  background: linear-gradient(
+    to right,
+    #ff0000 0%,
+    #ffff00 16.6%,
+    #00ff00 33.3%,
+    #00ffff 50%,
+    #0000ff 66.6%,
+    #ff00ff 83.3%,
+    #ff0000 100%
+  );
+}
+
+.inline-color-picker__hue-target {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.inline-color-picker__preview-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.inline-color-picker__preview {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--stroke);
+}
+
+.inline-color-picker__hex {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.03em;
 }
 
 .settings-tabs {

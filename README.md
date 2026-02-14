@@ -2,7 +2,7 @@
 
 Electron + React 的 OSC/Audio/MIDI/DMX 時間軸控制 DAW。
 
-## 目前封裝版本
+## 目前封裝版本（v1.0.0）
 
 位於 `release/`：
 
@@ -58,9 +58,10 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --config.artif
 - 右鍵 Cue：編輯 / 刪除
 - 雙擊 Composition：改名
 - 拖拉 Composition：改順序
+- `Alt/Option + 點擊 Track 的 +`：開啟 Multi Add（一次新增多軌）
 - 雙擊 Node：編輯數值
 - 拖拉 Node：改時間與數值
-- `Alt/Option + 拖拉 Node`：對齊 Cue 輔助線
+- `Alt/Option + 拖拉 Node`：吸附到最近 Cue
 - 右鍵 Node：切換曲線模式
 - 點擊色塊：套用 Track 顏色
 - `Shift + 點 Track`：範圍選取
@@ -94,3 +95,9 @@ Legacy（仍支援）：
 
 - NL Interactive
 - Copyright © NL Interactive
+
+## Donate
+
+如果這個專案對你有幫助，歡迎支持：
+
+![OSCDAW Donate QRCode](docs/assets/oscdaw-donate-qrcode.png)

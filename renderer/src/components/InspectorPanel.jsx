@@ -295,6 +295,197 @@ export default function InspectorPanel({
               <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
             </div>
           </div>
+        ) : track.kind === 'dmx-color' ? (
+          <div className="inspector__section" key="dmx-color-inspector">
+            <div className="inspector__title">DMX Color (Art-Net)</div>
+            <div className="field">
+              <label>Art-Net IP</label>
+              <input
+                className="input input--mono"
+                value={typeof track.dmxColor?.host === 'string' ? track.dmxColor.host : '127.0.0.1'}
+                onChange={(event) =>
+                  onPatch({
+                    dmxColor: { host: event.target.value },
+                  })}
+              />
+            </div>
+            <div className="field-grid">
+              <div className="field">
+                <label>Universe</label>
+                <input
+                  className="input"
+                  type="number"
+                  min="0"
+                  max="32767"
+                  step="1"
+                  value={Number.isFinite(track.dmxColor?.universe) ? track.dmxColor.universe : 0}
+                  onChange={(event) =>
+                    onPatch({
+                      dmxColor: { universe: parseNumber(event.target.value, 0) },
+                    })}
+                />
+              </div>
+              <div className="field">
+                <label>Channel Start</label>
+                <input
+                  className="input"
+                  type="number"
+                  min="1"
+                  max="512"
+                  step="1"
+                  value={Number.isFinite(track.dmxColor?.channelStart) ? track.dmxColor.channelStart : 1}
+                  onChange={(event) =>
+                    onPatch({
+                      dmxColor: { channelStart: parseNumber(event.target.value, 1) },
+                    })}
+                />
+              </div>
+            </div>
+            <div className="field">
+              <label>Fixture</label>
+              <select
+                className="input"
+                value={
+                  track.dmxColor?.fixtureType === 'rgbw' || track.dmxColor?.fixtureType === 'mapping'
+                    ? track.dmxColor.fixtureType
+                    : 'rgb'
+                }
+                onChange={(event) =>
+                  onPatch({
+                    dmxColor: {
+                      fixtureType:
+                        event.target.value === 'rgbw' || event.target.value === 'mapping'
+                          ? event.target.value
+                          : 'rgb',
+                    },
+                  })}
+              >
+                <option value="rgb">RGB</option>
+                <option value="rgbw">RGBW</option>
+                <option value="mapping">Channel Mapping</option>
+              </select>
+            </div>
+            <div className="field-grid">
+              <div className="field">
+                <label>Gradient From</label>
+                <input
+                  className="input"
+                  type="color"
+                  value={typeof track.dmxColor?.gradientFrom === 'string' ? track.dmxColor.gradientFrom : '#ff0000'}
+                  onChange={(event) =>
+                    onPatch({
+                      dmxColor: { gradientFrom: event.target.value },
+                    })}
+                />
+              </div>
+              <div className="field">
+                <label>Gradient To</label>
+                <input
+                  className="input"
+                  type="color"
+                  value={typeof track.dmxColor?.gradientTo === 'string' ? track.dmxColor.gradientTo : '#0000ff'}
+                  onChange={(event) =>
+                    onPatch({
+                      dmxColor: { gradientTo: event.target.value },
+                    })}
+                />
+              </div>
+            </div>
+            {track.dmxColor?.fixtureType === 'mapping' && (
+              <>
+                <div className="field">
+                  <label>RGB Mapping</label>
+                  <select
+                    className="input"
+                    value={Number(track.dmxColor?.mappingChannels) === 3 ? '3' : '4'}
+                    onChange={(event) =>
+                      onPatch({
+                        dmxColor: { mappingChannels: event.target.value === '3' ? 3 : 4 },
+                      })}
+                  >
+                    <option value="3">3 Channels (RGB)</option>
+                    <option value="4">4 Channels (RGBW)</option>
+                  </select>
+                </div>
+                <div className="field-grid">
+                  <div className="field">
+                    <label>R Map</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min="1"
+                      max="512"
+                      step="1"
+                      value={Number.isFinite(track.dmxColor?.mapping?.r) ? track.dmxColor.mapping.r : 1}
+                      onChange={(event) =>
+                        onPatch({
+                          dmxColor: { mapping: { r: parseNumber(event.target.value, 1) } },
+                        })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>G Map</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min="1"
+                      max="512"
+                      step="1"
+                      value={Number.isFinite(track.dmxColor?.mapping?.g) ? track.dmxColor.mapping.g : 2}
+                      onChange={(event) =>
+                        onPatch({
+                          dmxColor: { mapping: { g: parseNumber(event.target.value, 2) } },
+                        })}
+                    />
+                  </div>
+                </div>
+                <div className="field-grid">
+                  <div className="field">
+                    <label>B Map</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min="1"
+                      max="512"
+                      step="1"
+                      value={Number.isFinite(track.dmxColor?.mapping?.b) ? track.dmxColor.mapping.b : 3}
+                      onChange={(event) =>
+                        onPatch({
+                          dmxColor: { mapping: { b: parseNumber(event.target.value, 3) } },
+                        })}
+                    />
+                  </div>
+                  {Number(track.dmxColor?.mappingChannels) === 4 && (
+                    <div className="field">
+                      <label>W Map</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min="1"
+                        max="512"
+                        step="1"
+                        value={Number.isFinite(track.dmxColor?.mapping?.w) ? track.dmxColor.mapping.w : 4}
+                        onChange={(event) =>
+                          onPatch({
+                            dmxColor: { mapping: { w: parseNumber(event.target.value, 4) } },
+                          })}
+                      />
+                    </div>
+                  )}
+                </div>
+                <div className="field__hint">
+                  Mapping numbers are relative to Channel Start (1 = start). Select 3ch or 4ch mapping above.
+                </div>
+              </>
+            )}
+            <div className="field__hint">
+              Nodes (0-255) drive position on gradient and output DMX color channels.
+            </div>
+            <div className="inspector__row">
+              <span>Nodes</span>
+              <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
+            </div>
+          </div>
         ) : (
           <div className="inspector__section" key="osc-inspector">
             <div className="inspector__title">OSC</div>
