@@ -4,6 +4,11 @@ const AUDIO_BUFFER_SIZES = [128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 const HISTORY_LIMIT = 200;
 const HISTORY_ACTIONS = new Set([
   'update-project',
+  'add-composition',
+  'delete-composition',
+  'move-composition',
+  'switch-composition',
+  'update-composition',
   'add-track',
   'add-tracks',
   'paste-tracks',
@@ -206,6 +211,7 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
 
 const createNodeId = () => `node-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 const createCueId = () => `cue-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+const createCompositionId = () => `composition-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 
 const normalizeView = (view) => {
   const length = Math.max(toFinite(view.length, 120), 1);
@@ -228,8 +234,62 @@ const normalizeView = (view) => {
   };
 };
 
+const normalizeCues = (cues, length) => (Array.isArray(cues) ? cues : [])
+  .map((cue) => ({
+    id: cue.id ?? createCueId(),
+    t: clamp(cue.t ?? 0, 0, length),
+  }))
+  .sort((a, b) => a.t - b.t);
+
+const normalizeTracks = (tracks) => (Array.isArray(tracks) ? tracks : [])
+  .map((track, index) => normalizeTrack(track, pickTrackColor(index + 1)));
+
+const normalizeComposition = (composition, index, fallbackView) => {
+  const view = normalizeView(composition?.view || fallbackView);
+  return {
+    id:
+      typeof composition?.id === 'string' && composition.id.trim()
+        ? composition.id
+        : createCompositionId(),
+    name:
+      typeof composition?.name === 'string' && composition.name.trim()
+        ? composition.name.trim()
+        : `Composition ${String(index).padStart(2, '0')}`,
+    view,
+    cues: normalizeCues(composition?.cues, view.length),
+    tracks: normalizeTracks(composition?.tracks),
+  };
+};
+
+const syncActiveCompositionInProject = (project) => {
+  const compositions = Array.isArray(project.compositions) ? project.compositions : [];
+  if (!compositions.length) return project;
+  const activeId =
+    typeof project.activeCompositionId === 'string' && project.activeCompositionId
+      ? project.activeCompositionId
+      : compositions[0].id;
+  const view = normalizeView(project.view || compositions[0].view);
+  const cues = normalizeCues(project.cues, view.length);
+  const tracks = normalizeTracks(project.tracks);
+  const nextCompositions = compositions.map((composition) => (
+    composition.id !== activeId
+      ? composition
+      : { ...composition, view, cues, tracks }
+  ));
+  return {
+    ...project,
+    activeCompositionId: activeId,
+    view,
+    cues,
+    tracks,
+    compositions: nextCompositions,
+  };
+};
+
 const normalizeProject = (project) => {
-  const view = normalizeView(project.view || { start: 0, end: 8, length: 120, trackHeight: 96 });
+  const fallbackView = normalizeView(project.view || { start: 0, end: 8, length: 120, trackHeight: 96 });
+  const fallbackCues = normalizeCues(project.cues, fallbackView.length);
+  const fallbackTracks = normalizeTracks(project.tracks);
   const audio = {
     outputDeviceId:
       typeof project.audio?.outputDeviceId === 'string' && project.audio.outputDeviceId
@@ -249,12 +309,6 @@ const normalizeProject = (project) => {
       ),
     },
   };
-  const cues = (project.cues || [])
-    .map((cue) => ({
-      id: cue.id ?? createCueId(),
-      t: clamp(cue.t ?? 0, 0, view.length),
-    }))
-    .sort((a, b) => a.t - b.t);
   const osc = {
     host:
       typeof project.osc?.host === 'string' && project.osc.host.trim()
@@ -274,12 +328,36 @@ const normalizeProject = (project) => {
         ? project.midi.outputId
         : DEFAULT_MIDI_SETTINGS.outputId,
   };
+  const sourceCompositions = Array.isArray(project.compositions) && project.compositions.length
+    ? project.compositions
+    : [{
+      id:
+        typeof project.activeCompositionId === 'string' && project.activeCompositionId
+          ? project.activeCompositionId
+          : createCompositionId(),
+      name: 'Composition 01',
+      view: fallbackView,
+      cues: fallbackCues,
+      tracks: fallbackTracks,
+    }];
+  const compositions = sourceCompositions
+    .map((composition, index) => normalizeComposition(composition, index + 1, fallbackView));
+  const activeCompositionId =
+    typeof project.activeCompositionId === 'string'
+    && compositions.some((composition) => composition.id === project.activeCompositionId)
+      ? project.activeCompositionId
+      : compositions[0].id;
+  const activeComposition = compositions.find((composition) => composition.id === activeCompositionId)
+    || compositions[0];
+
   return {
     ...project,
-    view,
+    view: activeComposition.view,
     osc,
     audio,
     midi,
+    activeCompositionId,
+    compositions,
     timebase: {
       ...(project.timebase || {}),
       bpm: toFinite(project.timebase?.bpm, 120),
@@ -291,8 +369,8 @@ const normalizeProject = (project) => {
         ? project.timebase.syncFps
         : DEFAULT_SYNC_FPS_ID,
     },
-    cues,
-    tracks: (project.tracks || []).map((track, index) => normalizeTrack(track, pickTrackColor(index + 1))),
+    cues: activeComposition.cues,
+    tracks: activeComposition.tracks,
   };
 };
 
@@ -641,6 +719,130 @@ const reduceProjectState = (state, action) => {
   switch (action.type) {
     case 'select-track':
       return { ...state, selectedTrackId: action.id };
+    case 'add-composition': {
+      const syncedProject = syncActiveCompositionInProject(state.project);
+      const sourceView = normalizeView(syncedProject.view || { start: 0, end: 8, length: 120, trackHeight: 96 });
+      const view = normalizeView({
+        start: 0,
+        end: Math.min(8, sourceView.length),
+        length: sourceView.length,
+        trackHeight: sourceView.trackHeight,
+      });
+      const nextIndex = (syncedProject.compositions?.length || 0) + 1;
+      const composition = {
+        id: createCompositionId(),
+        name:
+          typeof action.name === 'string' && action.name.trim()
+            ? action.name.trim()
+            : `Composition ${String(nextIndex).padStart(2, '0')}`,
+        view,
+        cues: [],
+        tracks: [],
+      };
+      return {
+        ...state,
+        project: {
+          ...syncedProject,
+          activeCompositionId: composition.id,
+          compositions: [...(syncedProject.compositions || []), composition],
+          view: composition.view,
+          cues: composition.cues,
+          tracks: composition.tracks,
+        },
+        selectedTrackId: null,
+      };
+    }
+    case 'delete-composition': {
+      const syncedProject = syncActiveCompositionInProject(state.project);
+      const compositions = [...(syncedProject.compositions || [])];
+      if (compositions.length <= 1) return state;
+      const deleteId = typeof action.id === 'string' && action.id
+        ? action.id
+        : syncedProject.activeCompositionId;
+      const deleteIndex = compositions.findIndex((composition) => composition.id === deleteId);
+      if (deleteIndex < 0) return state;
+      compositions.splice(deleteIndex, 1);
+      const nextActiveId =
+        syncedProject.activeCompositionId === deleteId
+          ? (compositions[Math.min(deleteIndex, compositions.length - 1)]?.id || compositions[0]?.id || null)
+          : syncedProject.activeCompositionId;
+      const activeComposition = compositions.find((composition) => composition.id === nextActiveId)
+        || compositions[0];
+      if (!activeComposition) return state;
+      return {
+        ...state,
+        project: {
+          ...syncedProject,
+          compositions,
+          activeCompositionId: activeComposition.id,
+          view: activeComposition.view,
+          cues: activeComposition.cues,
+          tracks: activeComposition.tracks,
+        },
+        selectedTrackId: activeComposition.tracks[0]?.id ?? null,
+      };
+    }
+    case 'switch-composition': {
+      const id = typeof action.id === 'string' ? action.id : '';
+      if (!id) return state;
+      const syncedProject = syncActiveCompositionInProject(state.project);
+      const target = (syncedProject.compositions || []).find((composition) => composition.id === id);
+      if (!target) return state;
+      return {
+        ...state,
+        project: {
+          ...syncedProject,
+          activeCompositionId: target.id,
+          view: target.view,
+          cues: target.cues,
+          tracks: target.tracks,
+        },
+        selectedTrackId: target.tracks[0]?.id ?? null,
+      };
+    }
+    case 'move-composition': {
+      const sourceId = typeof action.sourceId === 'string' ? action.sourceId : '';
+      const targetId = typeof action.targetId === 'string' ? action.targetId : '';
+      if (!sourceId || !targetId || sourceId === targetId) return state;
+      const syncedProject = syncActiveCompositionInProject(state.project);
+      const compositions = [...(syncedProject.compositions || [])];
+      const sourceIndex = compositions.findIndex((composition) => composition.id === sourceId);
+      const targetIndex = compositions.findIndex((composition) => composition.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return state;
+
+      const [moved] = compositions.splice(sourceIndex, 1);
+      const nextTargetIndex = compositions.findIndex((composition) => composition.id === targetId);
+      const insertAt = action.position === 'after' ? nextTargetIndex + 1 : nextTargetIndex;
+      compositions.splice(Math.max(0, Math.min(insertAt, compositions.length)), 0, moved);
+
+      return {
+        ...state,
+        project: { ...syncedProject, compositions },
+      };
+    }
+    case 'update-composition': {
+      const id = typeof action.id === 'string' ? action.id : '';
+      if (!id || !action.patch) return state;
+      const syncedProject = syncActiveCompositionInProject(state.project);
+      let changed = false;
+      const compositions = (syncedProject.compositions || []).map((composition) => {
+        if (composition.id !== id) return composition;
+        const next = {
+          ...composition,
+          name:
+            typeof action.patch.name === 'string' && action.patch.name.trim()
+              ? action.patch.name.trim()
+              : composition.name,
+        };
+        if (next.name !== composition.name) changed = true;
+        return next;
+      });
+      if (!changed) return state;
+      return {
+        ...state,
+        project: { ...syncedProject, compositions },
+      };
+    }
     case 'set-unit':
       return {
         ...state,
@@ -668,7 +870,7 @@ const reduceProjectState = (state, action) => {
       };
       return {
         ...next,
-        project: normalizeProject(next.project),
+        project: normalizeProject(syncActiveCompositionInProject(next.project)),
       };
     }
     case 'add-track': {
@@ -1044,8 +1246,14 @@ export const projectReducer = (state, action) => {
     };
   }
 
-  const nextState = reduceProjectState(state, action);
-  if (nextState === state) return state;
+  const reducedState = reduceProjectState(state, action);
+  if (reducedState === state) return state;
+  const nextState = reducedState.project === state.project
+    ? reducedState
+    : {
+      ...reducedState,
+      project: syncActiveCompositionInProject(reducedState.project),
+    };
 
   if (!shouldTrackHistory(action)) {
     return {

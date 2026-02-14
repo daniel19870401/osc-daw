@@ -144,14 +144,27 @@ body {
 .workspace {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--inspector-width);
+  grid-template-columns: var(--composition-width) minmax(0, 1fr) var(--inspector-width);
   gap: 16px;
   padding: 0 16px 16px;
   position: relative;
+  --composition-width: 220px;
   --inspector-width: 260px;
   --track-list-width: 280px;
   min-height: 0;
   overflow: hidden;
+}
+
+.workspace--no-compositions {
+  grid-template-columns: minmax(0, 1fr) var(--inspector-width);
+}
+
+.workspace--no-inspector {
+  grid-template-columns: var(--composition-width) minmax(0, 1fr);
+}
+
+.workspace--no-compositions.workspace--no-inspector {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .tracks-pane {
@@ -168,6 +181,7 @@ body {
 
 .track-list,
 .timeline,
+.composition-panel,
 .inspector,
 .timeline-header-wrap,
 .timeline__lanes--panel {
@@ -177,6 +191,100 @@ body {
   box-shadow: 0 12px 24px var(--shadow);
   overflow: hidden;
   min-height: 0;
+}
+
+.composition-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.composition-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.composition-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.composition-panel__empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 2px;
+}
+
+.composition-row {
+  border: 1px solid rgba(39, 48, 66, 0.75);
+  border-radius: 10px;
+  background: rgba(15, 19, 28, 0.72);
+  color: var(--text);
+  padding: 8px 10px;
+  text-align: left;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.composition-row:hover {
+  border-color: rgba(93, 216, 199, 0.35);
+}
+
+.composition-row:focus-visible {
+  outline: 1px solid rgba(93, 216, 199, 0.65);
+  outline-offset: 1px;
+}
+
+.composition-row.is-active {
+  border-color: rgba(93, 216, 199, 0.6);
+  background: rgba(93, 216, 199, 0.14);
+}
+
+.composition-row.is-dragging {
+  opacity: 0.45;
+}
+
+.composition-row.is-drop-before {
+  box-shadow: inset 0 2px 0 rgba(93, 216, 199, 0.9);
+}
+
+.composition-row.is-drop-after {
+  box-shadow: inset 0 -2px 0 rgba(93, 216, 199, 0.9);
+}
+
+.composition-row__index {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.composition-row__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.composition-row__name-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.composition-row__meta {
+  grid-column: 1 / -1;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .track-list--header {
@@ -590,6 +698,10 @@ body {
   border-radius: 12px;
   background: rgba(13, 17, 26, 0.86);
   box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+}
+
+.zoom-footer__help {
+  margin-right: auto;
 }
 
 .zoom-footer__group {
@@ -1207,13 +1319,6 @@ body {
   color: var(--muted);
 }
 
-.help-float {
-  position: fixed;
-  left: 24px;
-  bottom: 24px;
-  z-index: 6;
-}
-
 .inspector {
   display: flex;
   flex-direction: column;
@@ -1356,6 +1461,12 @@ body {
   color: var(--muted);
 }
 
+.btn--ghost.is-active {
+  border-color: rgba(93, 216, 199, 0.45);
+  color: var(--text);
+  background: rgba(93, 216, 199, 0.16);
+}
+
 .btn--record {
   border-color: rgba(255, 120, 120, 0.4);
   color: rgba(255, 196, 196, 0.95);
@@ -1394,8 +1505,13 @@ body {
 @media (max-width: 1100px) {
   .workspace {
     grid-template-columns: minmax(0, 1fr);
+    --composition-width: 0px;
     --inspector-width: 0px;
     --track-list-width: 200px;
+  }
+
+  .composition-panel {
+    display: none;
   }
 
   .inspector {
@@ -1447,8 +1563,4 @@ body {
     width: auto;
   }
 
-  .help-float {
-    left: 12px;
-    bottom: 12px;
-  }
 }

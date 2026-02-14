@@ -21,6 +21,10 @@ export default function TransportBar({
   canRedo,
   onSyncChange,
   onSyncFpsChange,
+  isCompositionsVisible,
+  isInspectorVisible,
+  onToggleCompositions,
+  onToggleInspector,
 }) {
   const [isSyncMenuOpen, setIsSyncMenuOpen] = useState(false);
   const [isSyncFpsMenuOpen, setIsSyncFpsMenuOpen] = useState(false);
@@ -155,6 +159,20 @@ export default function TransportBar({
         <button className="btn btn--ghost" onClick={onRedo} disabled={!canRedo}>Redo</button>
         <button className="btn btn--ghost" onClick={onSave}>Save</button>
         <button className="btn btn--ghost" onClick={onLoad}>Load</button>
+        <button
+          className={`btn btn--ghost ${isCompositionsVisible ? 'is-active' : ''}`}
+          onClick={onToggleCompositions}
+          title="Show/Hide compositions panel"
+        >
+          Comps
+        </button>
+        <button
+          className={`btn btn--ghost ${isInspectorVisible ? 'is-active' : ''}`}
+          onClick={onToggleInspector}
+          title="Show/Hide inspector panel"
+        >
+          Inspector
+        </button>
         <button className="btn btn--ghost" onClick={onOpenSettings}>Settings</button>
       </div>
     </header>

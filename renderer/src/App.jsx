@@ -105,6 +105,12 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState('project');
+  const [isCompositionsVisible, setIsCompositionsVisible] = useState(true);
+  const [isInspectorVisible, setIsInspectorVisible] = useState(true);
+  const [editingCompositionId, setEditingCompositionId] = useState(null);
+  const [editingCompositionName, setEditingCompositionName] = useState('');
+  const [dragCompositionId, setDragCompositionId] = useState(null);
+  const [compositionDropTarget, setCompositionDropTarget] = useState(null);
   const [isAddTrackMenuOpen, setIsAddTrackMenuOpen] = useState(false);
   const [addTrackMenuMode, setAddTrackMenuMode] = useState('single');
   const [multiAddDialog, setMultiAddDialog] = useState(null);
@@ -142,6 +148,9 @@ export default function App() {
   const isPlayingRef = useRef(false);
   const syncModeRef = useRef(project.timebase?.sync || 'Internal');
   const projectLengthRef = useRef(project.view.length || 0);
+  const compositionsRef = useRef(project.compositions || []);
+  const activeCompositionIdRef = useRef(project.activeCompositionId || null);
+  const compositionPlayheadsRef = useRef(new Map());
   const cuesRef = useRef(project.cues || []);
   const viewRef = useRef(project.view);
   const oscPendingPreviewRef = useRef(new Map());
@@ -174,6 +183,27 @@ export default function App() {
   const midiTrackRuntimeRef = useRef(new Map());
   const artNetSequenceRef = useRef(new Map());
   const [audioWaveforms, setAudioWaveforms] = useState({});
+
+  const compositions = useMemo(
+    () => (Array.isArray(project.compositions) ? project.compositions : []),
+    [project.compositions]
+  );
+  const activeCompositionId = project.activeCompositionId || compositions[0]?.id || null;
+  const getRememberedCompositionPlayhead = useCallback((composition) => {
+    if (!composition?.id) return 0;
+    const length = Math.max(Number(composition.view?.length) || 0, 0);
+    const remembered = compositionPlayheadsRef.current.get(composition.id);
+    const fallback = clamp(Number(composition.view?.start) || 0, 0, length);
+    const value = Number.isFinite(remembered) ? remembered : fallback;
+    return clamp(value, 0, length);
+  }, []);
+  const rememberActiveCompositionPlayhead = useCallback(() => {
+    const activeId = activeCompositionIdRef.current;
+    if (!activeId) return;
+    const length = Math.max(Number(viewRef.current?.length) || 0, 0);
+    const value = clamp(Number(playheadRef.current) || 0, 0, length);
+    compositionPlayheadsRef.current.set(activeId, value);
+  }, []);
 
   const selectedTrack = useMemo(
     () => project.tracks.find((track) => track.id === selectedTrackId),
@@ -275,6 +305,39 @@ export default function App() {
   useEffect(() => {
     projectLengthRef.current = Number(project.view.length) || 0;
   }, [project.view.length]);
+
+  useEffect(() => {
+    compositionsRef.current = Array.isArray(project.compositions) ? project.compositions : [];
+    activeCompositionIdRef.current = project.activeCompositionId || compositionsRef.current[0]?.id || null;
+    const alive = new Set();
+    compositionsRef.current.forEach((composition) => {
+      if (!composition?.id) return;
+      alive.add(composition.id);
+      const length = Math.max(Number(composition.view?.length) || 0, 0);
+      const fallback = clamp(Number(composition.view?.start) || 0, 0, length);
+      const remembered = compositionPlayheadsRef.current.get(composition.id);
+      if (!Number.isFinite(remembered)) {
+        compositionPlayheadsRef.current.set(composition.id, fallback);
+        return;
+      }
+      const clamped = clamp(remembered, 0, length);
+      if (clamped !== remembered) {
+        compositionPlayheadsRef.current.set(composition.id, clamped);
+      }
+    });
+    Array.from(compositionPlayheadsRef.current.keys()).forEach((compositionId) => {
+      if (!alive.has(compositionId)) {
+        compositionPlayheadsRef.current.delete(compositionId);
+      }
+    });
+  }, [project.compositions, project.activeCompositionId]);
+
+  useEffect(() => {
+    if (!activeCompositionId) return;
+    const length = Math.max(Number(project.view.length) || 0, 0);
+    const value = clamp(Number(playhead) || 0, 0, length);
+    compositionPlayheadsRef.current.set(activeCompositionId, value);
+  }, [activeCompositionId, playhead, project.view.length]);
 
   useEffect(() => {
     cuesRef.current = project.cues || [];
@@ -1122,6 +1185,105 @@ export default function App() {
       if (!address) return;
       const isOn = Number.isFinite(value) ? value >= 0.5 : false;
 
+      const resolveCueNumber = (path, numericValue, argumentList = []) => {
+        const argNumber = argumentList
+          .map((item) => Number(item))
+          .find((item) => Number.isFinite(item));
+        if (Number.isFinite(argNumber)) return Math.round(argNumber);
+        if (Number.isFinite(numericValue)) return Math.round(numericValue);
+        const match = /^\/oscdaw\/cue\/(\d+)$/.exec(path);
+        if (match) return Number(match[1]);
+        return null;
+      };
+
+      const jumpToCueNumber = (cueNumber, cueList, view) => {
+        if (!Number.isFinite(cueNumber) || cueNumber < 1) return;
+        const cues = (Array.isArray(cueList) ? cueList : []).slice().sort((a, b) => a.t - b.t);
+        const targetCue = cues[cueNumber - 1];
+        if (!targetCue) return;
+        const safeView = view || { start: 0, end: 8, length: 120 };
+        const cueTime = clamp(Number(targetCue.t) || 0, 0, Math.max(Number(safeView.length) || 0, 0));
+        if (isPlayingRef.current && (syncModeRef.current || 'Internal') === 'Internal') {
+          startInternalClock(cueTime);
+        }
+        lastTickRef.current = null;
+        setPlayhead(cueTime);
+
+        const viewStart = Number(safeView.start) || 0;
+        const viewEnd = Number(safeView.end) || 0;
+        const span = Math.max(viewEnd - viewStart, 1);
+        if (cueTime < viewStart || cueTime > viewEnd) {
+          const nextStart = clamp(
+            cueTime - span * 0.25,
+            0,
+            Math.max((Number(safeView.length) || 0) - span, 0)
+          );
+          dispatch({ type: 'scroll-time', start: nextStart });
+        }
+      };
+
+      const switchCompositionByNumber = (compositionNumber) => {
+        const list = compositionsRef.current || [];
+        if (!Number.isFinite(compositionNumber) || compositionNumber < 1) return null;
+        const target = list[Math.round(compositionNumber) - 1];
+        if (!target) return null;
+        if (target.id !== activeCompositionIdRef.current) {
+          rememberActiveCompositionPlayhead();
+          setIsPlaying(false);
+          stopInternalClock();
+          lastTickRef.current = null;
+          dispatch({ type: 'switch-composition', id: target.id });
+          const startTime = getRememberedCompositionPlayhead(target);
+          setPlayhead(startTime);
+          syncAudioToPlayhead(startTime);
+          setSelectedNodeContext({ trackId: null, nodeIds: [] });
+        }
+        return target;
+      };
+
+      const compositionMatch = /^\/oscdaw\/composition\/(\d+)\/([a-z0-9_-]+)(?:\/(\d+))?$/.exec(address);
+      if (compositionMatch) {
+        const compositionNumber = Number(compositionMatch[1]);
+        const command = compositionMatch[2];
+        const commandPathValue = compositionMatch[3] ? Number(compositionMatch[3]) : null;
+        const targetComposition = switchCompositionByNumber(compositionNumber);
+        if (!targetComposition) return;
+
+        if (command === 'select') {
+          return;
+        }
+        if (command === 'rec') {
+          if (!Number.isFinite(value)) return;
+          setIsRecording((prev) => (prev === isOn ? prev : isOn));
+          return;
+        }
+        if (command === 'play') {
+          if (!Number.isFinite(value)) return;
+          setIsPlaying((prev) => (prev === isOn ? prev : isOn));
+          return;
+        }
+        if (command === 'stop') {
+          if (!Number.isFinite(value) || !isOn) return;
+          setIsPlaying(false);
+          stopInternalClock();
+          lastTickRef.current = null;
+          dispatch({ type: 'scroll-time', start: 0 });
+          setPlayhead(0);
+          syncAudioToPlayhead(0);
+          return;
+        }
+        if (command === 'cue') {
+          const cueNumber = resolveCueNumber(
+            address,
+            Number.isFinite(commandPathValue) ? commandPathValue : value,
+            args
+          );
+          jumpToCueNumber(cueNumber, targetComposition.cues, targetComposition.view);
+        }
+        return;
+      }
+
+      // Legacy aliases (without composition segment).
       if (address === '/oscdaw/rec') {
         if (!Number.isFinite(value)) return;
         setIsRecording((prev) => (prev === isOn ? prev : isOn));
@@ -1133,53 +1295,18 @@ export default function App() {
         return;
       }
       if (address === '/oscdaw/stop') {
-        if (!Number.isFinite(value)) return;
-        if (!isOn) return;
+        if (!Number.isFinite(value) || !isOn) return;
         setIsPlaying(false);
+        stopInternalClock();
         lastTickRef.current = null;
         dispatch({ type: 'scroll-time', start: 0 });
         setPlayhead(0);
+        syncAudioToPlayhead(0);
         return;
       }
-
       if (address === '/oscdaw/cue' || address.startsWith('/oscdaw/cue/')) {
-        let cueNumber = null;
-        const argNumber = args
-          .map((item) => Number(item))
-          .find((item) => Number.isFinite(item));
-        if (Number.isFinite(argNumber)) {
-          cueNumber = Math.round(argNumber);
-        } else if (Number.isFinite(value)) {
-          cueNumber = Math.round(value);
-        } else {
-          const match = /^\/oscdaw\/cue\/(\d+)$/.exec(address);
-          if (match) cueNumber = Number(match[1]);
-        }
-        if (!Number.isFinite(cueNumber) || cueNumber < 1) return;
-
-        const cues = (cuesRef.current || []).slice().sort((a, b) => a.t - b.t);
-        const targetCue = cues[cueNumber - 1];
-        if (!targetCue) return;
-
-        const view = viewRef.current || { start: 0, end: 8, length: 120 };
-        const cueTime = clamp(Number(targetCue.t) || 0, 0, Math.max(Number(view.length) || 0, 0));
-        if (isPlayingRef.current && (syncModeRef.current || 'Internal') === 'Internal') {
-          startInternalClock(cueTime);
-        }
-        lastTickRef.current = null;
-        setPlayhead(cueTime);
-
-        const viewStart = Number(view.start) || 0;
-        const viewEnd = Number(view.end) || 0;
-        const span = Math.max(viewEnd - viewStart, 1);
-        if (cueTime < viewStart || cueTime > viewEnd) {
-          const nextStart = clamp(
-            cueTime - span * 0.25,
-            0,
-            Math.max((Number(view.length) || 0) - span, 0)
-          );
-          dispatch({ type: 'scroll-time', start: nextStart });
-        }
+        const cueNumber = resolveCueNumber(address, value, args);
+        jumpToCueNumber(cueNumber, cuesRef.current, viewRef.current);
       }
     });
 
@@ -1188,7 +1315,7 @@ export default function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [project.osc?.controlPort, startInternalClock]);
+  }, [project.osc?.controlPort, getRememberedCompositionPlayhead, rememberActiveCompositionPlayhead]);
 
   useEffect(() => () => {
     const bridge = window.oscDaw;
@@ -2837,6 +2964,7 @@ export default function App() {
       audioUrlRef.current.clear();
       pendingSeekRef.current.clear();
       setAudioWaveforms({});
+      compositionPlayheadsRef.current = new Map();
       dispatch({ type: 'load-project', project: data });
       setIsPlaying(false);
       setIsRecording(false);
@@ -2930,9 +3058,114 @@ export default function App() {
     dispatch({ type: 'redo' });
   };
 
+  const handleToggleCompositions = () => {
+    setIsCompositionsVisible((prev) => !prev);
+  };
+
+  const handleToggleInspector = () => {
+    setIsInspectorVisible((prev) => !prev);
+  };
+
   const openSettings = () => {
     setSettingsTab('project');
     setIsSettingsOpen(true);
+  };
+
+  const handleAddComposition = () => {
+    rememberActiveCompositionPlayhead();
+    setIsPlaying(false);
+    stopInternalClock();
+    lastTickRef.current = null;
+    dispatch({ type: 'add-composition' });
+    setPlayhead(0);
+    setSelectedNodeContext({ trackId: null, nodeIds: [] });
+    setEditingCompositionId(null);
+    setEditingCompositionName('');
+    setDragCompositionId(null);
+    setCompositionDropTarget(null);
+  };
+
+  const handleDeleteComposition = () => {
+    if (!activeCompositionId) return;
+    if (!Array.isArray(compositions) || compositions.length <= 1) return;
+    const currentIndex = compositions.findIndex((composition) => composition.id === activeCompositionId);
+    if (currentIndex < 0) return;
+    const nextComposition = compositions[
+      Math.min(currentIndex + 1, compositions.length - 1)
+    ] || compositions[Math.max(currentIndex - 1, 0)];
+    const nextPlayhead = getRememberedCompositionPlayhead(nextComposition);
+
+    setIsPlaying(false);
+    stopInternalClock();
+    lastTickRef.current = null;
+    dispatch({ type: 'delete-composition', id: activeCompositionId });
+    setPlayhead(nextPlayhead);
+    syncAudioToPlayhead(nextPlayhead);
+    setSelectedNodeContext({ trackId: null, nodeIds: [] });
+    setEditingCompositionId(null);
+    setEditingCompositionName('');
+    setDragCompositionId(null);
+    setCompositionDropTarget(null);
+  };
+
+  const handleSwitchComposition = (compositionId) => {
+    if (!compositionId || compositionId === activeCompositionId) return;
+    const target = compositions.find((composition) => composition.id === compositionId);
+    if (!target) return;
+    rememberActiveCompositionPlayhead();
+    setIsPlaying(false);
+    stopInternalClock();
+    lastTickRef.current = null;
+    const nextPlayhead = getRememberedCompositionPlayhead(target);
+    dispatch({ type: 'switch-composition', id: compositionId });
+    setPlayhead(nextPlayhead);
+    syncAudioToPlayhead(nextPlayhead);
+    setSelectedNodeContext({ trackId: null, nodeIds: [] });
+    setEditingCompositionId(null);
+    setEditingCompositionName('');
+    setDragCompositionId(null);
+    setCompositionDropTarget(null);
+  };
+
+  const beginRenameComposition = (composition) => {
+    if (!composition?.id) return;
+    setEditingCompositionId(composition.id);
+    setEditingCompositionName(composition.name || '');
+  };
+
+  const cancelRenameComposition = () => {
+    setEditingCompositionId(null);
+    setEditingCompositionName('');
+  };
+
+  const commitRenameComposition = () => {
+    if (!editingCompositionId) return;
+    const current = compositions.find((composition) => composition.id === editingCompositionId);
+    if (!current) {
+      cancelRenameComposition();
+      return;
+    }
+    const trimmed = (editingCompositionName || '').trim();
+    if (!trimmed || trimmed === current.name) {
+      cancelRenameComposition();
+      return;
+    }
+    dispatch({
+      type: 'update-composition',
+      id: editingCompositionId,
+      patch: { name: trimmed },
+    });
+    cancelRenameComposition();
+  };
+
+  const handleMoveComposition = (sourceId, targetId, position = 'before') => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    dispatch({
+      type: 'move-composition',
+      sourceId,
+      targetId,
+      position,
+    });
   };
 
   const openMultiAddDialog = (kind) => {
@@ -3035,6 +3268,10 @@ export default function App() {
         canRedo={canRedo}
         onSyncChange={handleSyncChange}
         onSyncFpsChange={handleSyncFpsChange}
+        isCompositionsVisible={isCompositionsVisible}
+        isInspectorVisible={isInspectorVisible}
+        onToggleCompositions={handleToggleCompositions}
+        onToggleInspector={handleToggleInspector}
         onOpenSettings={openSettings}
       />
 
@@ -3066,6 +3303,8 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Z</kbd><span>Undo</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + Z</kbd><span>Redo</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Y</kbd><span>Redo (alternative)</span></div>
+                <div className="help-shortcuts__row"><kbd>Top Bar: Comps</kbd><span>Show / Hide compositions panel</span></div>
+                <div className="help-shortcuts__row"><kbd>Top Bar: Inspector</kbd><span>Show / Hide inspector panel</span></div>
                 <div className="help-shortcuts__row"><kbd>Esc</kbd><span>Close this help dialog</span></div>
               </div>
 
@@ -3074,6 +3313,8 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Double Click Timeline</kbd><span>Add cue at clicked time</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Cue</kbd><span>Move cue time</span></div>
                 <div className="help-shortcuts__row"><kbd>Right Click Cue</kbd><span>Edit or delete cue</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click Composition</kbd><span>Rename composition</span></div>
+                <div className="help-shortcuts__row"><kbd>Drag Composition</kbd><span>Reorder compositions</span></div>
                 <div className="help-shortcuts__row"><kbd>Double Click Node</kbd><span>Edit node value</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Node</kbd><span>Move node in time/value</span></div>
                 <div className="help-shortcuts__row"><kbd>Alt + Drag Node</kbd><span>Snap node to cue guide</span></div>
@@ -3088,13 +3329,16 @@ export default function App() {
               <div className="help-shortcuts__section">
                 <div className="help-shortcuts__title">OSC Remote Control</div>
                 <div className="help-shortcuts__row"><kbd>Settings &gt; OSC &gt; OSC Control Port</kbd><span>Set incoming control port</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/rec 1</kbd><span>REC On</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/rec 0</kbd><span>REC Off</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/play 1</kbd><span>Play On</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/play 0</kbd><span>Play Off</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/stop 1</kbd><span>Stop + locate to 00:00:00.00</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/stop 0</kbd><span>No action</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/cue 10</kbd><span>Jump playhead to cue #10</span></div>
+                <div className="help-shortcuts__row"><kbd>Composition index</kbd><span>1-based order in the Compositions panel</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/5/select</kbd><span>Switch to Composition #5</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/rec 1</kbd><span>Switch to Composition #1 + REC On</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/rec 0</kbd><span>Switch to Composition #1 + REC Off</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/play 1</kbd><span>Switch to Composition #1 + Play On</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/play 0</kbd><span>Switch to Composition #1 + Play Off</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/stop 1</kbd><span>Switch to Composition #1 + Stop + locate 00:00:00.00</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/cue 10</kbd><span>Switch to Composition #1 + jump to cue #10</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/cue/10</kbd><span>Alternative cue path format</span></div>
+                <div className="help-shortcuts__row"><kbd>Legacy: /OSCDAW/rec|play|stop|cue</kbd><span>Still supported</span></div>
               </div>
 
               <div className="help-shortcuts__section help-shortcuts__section--brand">
@@ -3833,7 +4077,126 @@ export default function App() {
         style={{ display: 'none' }}
       />
 
-      <div className="workspace">
+      <div
+        className={`workspace${isCompositionsVisible ? '' : ' workspace--no-compositions'}${isInspectorVisible ? '' : ' workspace--no-inspector'}`}
+      >
+        {isCompositionsVisible && (
+          <aside className="composition-panel">
+            <div className="panel-header">
+              <div className="label">Compositions</div>
+              <div className="composition-panel__actions">
+                <button
+                  className="btn btn--ghost btn--tiny btn--symbol"
+                  onClick={handleAddComposition}
+                  title="Add composition"
+                >
+                  +
+                </button>
+                <button
+                  className="btn btn--ghost btn--tiny btn--symbol"
+                  onClick={handleDeleteComposition}
+                  disabled={compositions.length <= 1}
+                  title="Delete active composition"
+                >
+                  -
+                </button>
+              </div>
+            </div>
+            <div className="composition-panel__body">
+              {compositions.length === 0 ? (
+                <div className="composition-panel__empty">No compositions</div>
+              ) : (
+                compositions.map((composition, index) => (
+                  <div
+                    key={composition.id}
+                    className={`composition-row ${composition.id === activeCompositionId ? 'is-active' : ''} ${dragCompositionId === composition.id ? 'is-dragging' : ''} ${compositionDropTarget?.id === composition.id ? `is-drop-${compositionDropTarget.position}` : ''}`}
+                    onClick={() => {
+                      if (editingCompositionId === composition.id) return;
+                      handleSwitchComposition(composition.id);
+                    }}
+                    onDoubleClick={() => beginRenameComposition(composition)}
+                    onKeyDown={(event) => {
+                      if (editingCompositionId === composition.id) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        handleSwitchComposition(composition.id);
+                      }
+                    }}
+                    draggable={editingCompositionId !== composition.id}
+                    onDragStart={(event) => {
+                      if (editingCompositionId === composition.id) {
+                        event.preventDefault();
+                        return;
+                      }
+                      setDragCompositionId(composition.id);
+                      setCompositionDropTarget(null);
+                      event.dataTransfer.effectAllowed = 'move';
+                      event.dataTransfer.setData('text/plain', composition.id);
+                    }}
+                    onDragOver={(event) => {
+                      if (!dragCompositionId || dragCompositionId === composition.id) return;
+                      event.preventDefault();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                      setCompositionDropTarget({ id: composition.id, position });
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const sourceId = dragCompositionId || event.dataTransfer.getData('text/plain');
+                      if (sourceId && sourceId !== composition.id) {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const fallbackPosition = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                        const position = compositionDropTarget?.id === composition.id
+                          ? compositionDropTarget.position
+                          : fallbackPosition;
+                        handleMoveComposition(sourceId, composition.id, position);
+                      }
+                      setDragCompositionId(null);
+                      setCompositionDropTarget(null);
+                    }}
+                    onDragEnd={() => {
+                      setDragCompositionId(null);
+                      setCompositionDropTarget(null);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    title="Click to switch / Double-click to rename / Drag to reorder"
+                  >
+                    <span className="composition-row__index">{String(index + 1).padStart(2, '0')}</span>
+                    {editingCompositionId === composition.id ? (
+                      <input
+                        className="input composition-row__name-input"
+                        value={editingCompositionName}
+                        autoFocus
+                        onChange={(event) => setEditingCompositionName(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            commitRenameComposition();
+                            return;
+                          }
+                          if (event.key === 'Escape') {
+                            event.preventDefault();
+                            cancelRenameComposition();
+                          }
+                        }}
+                        onBlur={commitRenameComposition}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      <span className="composition-row__name">{composition.name}</span>
+                    )}
+                    <span className="composition-row__meta">
+                      {formatHmsfTimecode(composition.view?.length || 0, syncFpsPreset.fps)}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </aside>
+        )}
+
         <div className="tracks-pane">
           <aside className="track-list track-list--header">
             <div className="panel-header track-list-header-panel">
@@ -4246,6 +4609,11 @@ export default function App() {
           </div>
 
           <div className="zoom-footer">
+            <div className="zoom-footer__help">
+              <button className="btn btn--ghost" onClick={() => setIsHelpOpen(true)}>
+                Help
+              </button>
+            </div>
             <div className="zoom-footer__group">
               <span className="timeline-controls__label">Zoom T</span>
               <div className="timeline-controls__buttons">
@@ -4273,32 +4641,29 @@ export default function App() {
           </div>
         </div>
 
-        <InspectorPanel
-          key={selectedTrack ? `${selectedTrack.id}-${selectedTrack.kind}` : 'inspector-empty'}
-          track={selectedTrack}
-          nameFocusToken={nameFocusToken}
-          midiOutputOptions={midiOutputOptions}
-          virtualMidiOutputId={VIRTUAL_MIDI_OUTPUT_ID}
-          virtualMidiOutputName={VIRTUAL_MIDI_OUTPUT_NAME}
-          onPatch={handlePatchTrack}
-          onNameEnterNext={handleNameEnterNext}
-          onAudioFile={(file) => {
-            if (!selectedTrack) return;
-            handleAudioFile(selectedTrack.id, file);
-          }}
-          onAddNode={() => {
-            if (!selectedTrack) return;
-            const t = clamp(playhead, 0, project.view.length);
-            const v = sampleTrackValue(selectedTrack, t);
-            handleAddNode(selectedTrack.id, { t, v, curve: 'linear' });
-          }}
-        />
+        {isInspectorVisible && (
+          <InspectorPanel
+            key={selectedTrack ? `${selectedTrack.id}-${selectedTrack.kind}` : 'inspector-empty'}
+            track={selectedTrack}
+            nameFocusToken={nameFocusToken}
+            midiOutputOptions={midiOutputOptions}
+            virtualMidiOutputId={VIRTUAL_MIDI_OUTPUT_ID}
+            virtualMidiOutputName={VIRTUAL_MIDI_OUTPUT_NAME}
+            onPatch={handlePatchTrack}
+            onNameEnterNext={handleNameEnterNext}
+            onAudioFile={(file) => {
+              if (!selectedTrack) return;
+              handleAudioFile(selectedTrack.id, file);
+            }}
+            onAddNode={() => {
+              if (!selectedTrack) return;
+              const t = clamp(playhead, 0, project.view.length);
+              const v = sampleTrackValue(selectedTrack, t);
+              handleAddNode(selectedTrack.id, { t, v, curve: 'linear' });
+            }}
+          />
+        )}
       </div>
-
-      <button className="help-float btn btn--ghost" onClick={() => setIsHelpOpen(true)}>
-        Help
-      </button>
-
     </div>
   );
 }
