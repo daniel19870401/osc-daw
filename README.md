@@ -109,6 +109,6 @@ Legacy（仍支援）：
 
 ## Donate
 
-如果這個專案對你有幫助，歡迎支持：
+如果這個專案對你有幫助，歡迎小額捐款支持：
 
 ![OSCDAW Donate QRCode](docs/assets/oscdaw-donate-qrcode.png)
