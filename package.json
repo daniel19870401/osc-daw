@@ -78,7 +78,7 @@
         }
       ],
       "icon": "build/icons/icon.icns",
-      "identity": "Developer ID Application: CHENG NAI CHUAN (F2QU9X6955)",
+      "identity": "CHENG NAI CHUAN (F2QU9X6955)",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
