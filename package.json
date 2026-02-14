@@ -1,6 +1,6 @@
 {
   "name": "osc-daw",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "OSC DAW UI prototype with Electron + React + SVG",
   "main": "electron/main.js",
   "type": "commonjs",

@@ -410,7 +410,7 @@ body {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  min-width: 124px;
+  min-width: 142px;
   padding: 6px;
   border-radius: 10px;
   border: 1px solid var(--stroke);
@@ -431,6 +431,7 @@ body {
   border-radius: 8px;
   cursor: pointer;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .tracks-add-menu__item:hover {
@@ -1286,6 +1287,17 @@ body {
   width: min(1000px, calc(100vw - 40px));
 }
 
+.modal__card--settings {
+  width: min(500px, 92vw);
+  height: 550px;
+  max-height: calc(100vh - 48px);
+}
+
+.modal__card--settings .modal__content {
+  flex: 1;
+  min-height: 0;
+}
+
 .modal__header {
   display: flex;
   justify-content: space-between;
@@ -1470,6 +1482,19 @@ body {
   border-color: rgba(93, 216, 199, 0.45);
   background: rgba(93, 216, 199, 0.2);
   color: var(--text);
+}
+
+.settings-panel__body {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.settings-panel__body .settings-section {
+  min-height: 100%;
+  box-sizing: border-box;
 }
 
 .settings-section {

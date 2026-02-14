@@ -4684,7 +4684,7 @@ export default function App() {
 
       {isSettingsOpen && (
         <div className="modal" role="dialog" aria-modal="true">
-          <div className="modal__card">
+          <div className="modal__card modal__card--settings">
             <div className="modal__header">
               <div className="label">Settings</div>
               <button className="btn btn--ghost" onClick={() => setIsSettingsOpen(false)}>
@@ -4722,185 +4722,187 @@ export default function App() {
                 </button>
               </div>
 
-              {settingsTab === 'project' && (
-                <div className="settings-section">
-                  <div className="settings-section__title">Project Settings</div>
-                  <div className="field">
-                    <label>Project Name</label>
-                    <input
-                      className="input"
-                      value={project.name ?? ''}
-                      onChange={(event) =>
-                        dispatch({ type: 'update-project', patch: { name: event.target.value } })
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label>FPS (OSC Send Rate)</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="1"
-                      max="240"
-                      step="1"
-                      value={Number.isFinite(project.timebase.fps) ? project.timebase.fps : 30}
-                      onChange={(event) =>
-                        dispatch({
-                          type: 'update-project',
-                          patch: { timebase: { fps: Number(event.target.value) || 1 } },
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label>Project Length (hh:mm:ss.ff)</label>
-                    <div className="field-grid field-grid--quad">
+              <div className="settings-panel__body">
+                {settingsTab === 'project' && (
+                  <div className="settings-section">
+                    <div className="settings-section__title">Project Settings</div>
+                    <div className="field">
+                      <label>Project Name</label>
                       <input
                         className="input"
-                        type="number"
-                        min="0"
-                        step="1"
-                        placeholder="hh"
-                        value={lengthParts.hours}
+                        value={project.name ?? ''}
                         onChange={(event) =>
-                          dispatch({
-                            type: 'update-project',
-                            patch: {
-                              view: {
-                                length: hmsfPartsToSeconds(
-                                  Number(event.target.value) || 0,
-                                  lengthParts.minutes,
-                                  lengthParts.seconds,
-                                  lengthParts.frames,
-                                  syncFpsPreset.fps
-                                ),
-                              },
-                            },
-                          })
+                          dispatch({ type: 'update-project', patch: { name: event.target.value } })
                         }
                       />
+                    </div>
+                    <div className="field">
+                      <label>FPS (OSC Send Rate)</label>
                       <input
                         className="input"
                         type="number"
-                        min="0"
-                        max="59"
+                        min="1"
+                        max="240"
                         step="1"
-                        placeholder="mm"
-                        value={lengthParts.minutes}
+                        value={Number.isFinite(project.timebase.fps) ? project.timebase.fps : 30}
                         onChange={(event) =>
                           dispatch({
                             type: 'update-project',
-                            patch: {
-                              view: {
-                                length: hmsfPartsToSeconds(
-                                  lengthParts.hours,
-                                  Number(event.target.value) || 0,
-                                  lengthParts.seconds,
-                                  lengthParts.frames,
-                                  syncFpsPreset.fps
-                                ),
-                              },
-                            },
-                          })
-                        }
-                      />
-                      <input
-                        className="input"
-                        type="number"
-                        min="0"
-                        max="59"
-                        step="1"
-                        placeholder="ss"
-                        value={lengthParts.seconds}
-                        onChange={(event) =>
-                          dispatch({
-                            type: 'update-project',
-                            patch: {
-                              view: {
-                                length: hmsfPartsToSeconds(
-                                  lengthParts.hours,
-                                  lengthParts.minutes,
-                                  Number(event.target.value) || 0,
-                                  lengthParts.frames,
-                                  syncFpsPreset.fps
-                                ),
-                              },
-                            },
-                          })
-                        }
-                      />
-                      <input
-                        className="input"
-                        type="number"
-                        min="0"
-                        max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
-                        step="1"
-                        placeholder="ff"
-                        value={lengthParts.frames}
-                        onChange={(event) =>
-                          dispatch({
-                            type: 'update-project',
-                            patch: {
-                              view: {
-                                length: hmsfPartsToSeconds(
-                                  lengthParts.hours,
-                                  lengthParts.minutes,
-                                  lengthParts.seconds,
-                                  Number(event.target.value) || 0,
-                                  syncFpsPreset.fps
-                                ),
-                              },
-                            },
+                            patch: { timebase: { fps: Number(event.target.value) || 1 } },
                           })
                         }
                       />
                     </div>
-                  </div>
-                  <div className="field">
-                    <label>MIDI In / Out</label>
-                    <div className="field-grid">
-                      <select
-                        className="input input--mono"
-                        value={project.midi?.inputId ?? VIRTUAL_MIDI_INPUT_ID}
-                        onChange={(event) =>
-                          dispatch({
-                            type: 'update-project',
-                            patch: { midi: { inputId: event.target.value } },
-                          })
-                        }
-                      >
-                        <option value={VIRTUAL_MIDI_INPUT_ID}>{VIRTUAL_MIDI_INPUT_NAME}</option>
-                        {midiDevices.inputs.map((device) => (
-                          <option key={device.id} value={device.id}>
-                            {device.name}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        className="input input--mono"
-                        value={project.midi?.outputId ?? VIRTUAL_MIDI_OUTPUT_ID}
-                        onChange={(event) =>
-                          dispatch({
-                            type: 'update-project',
-                            patch: { midi: { outputId: event.target.value } },
-                          })
-                        }
-                      >
-                        <option value={VIRTUAL_MIDI_OUTPUT_ID}>{VIRTUAL_MIDI_OUTPUT_NAME}</option>
-                        {midiDevices.outputs.map((device) => (
-                          <option key={device.id} value={device.id}>
-                            {device.name}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="field">
+                      <label>Project Length (hh:mm:ss.ff)</label>
+                      <div className="field-grid field-grid--quad">
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          step="1"
+                          placeholder="hh"
+                          value={lengthParts.hours}
+                          onChange={(event) =>
+                            dispatch({
+                              type: 'update-project',
+                              patch: {
+                                view: {
+                                  length: hmsfPartsToSeconds(
+                                    Number(event.target.value) || 0,
+                                    lengthParts.minutes,
+                                    lengthParts.seconds,
+                                    lengthParts.frames,
+                                    syncFpsPreset.fps
+                                  ),
+                                },
+                              },
+                            })
+                          }
+                        />
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="59"
+                          step="1"
+                          placeholder="mm"
+                          value={lengthParts.minutes}
+                          onChange={(event) =>
+                            dispatch({
+                              type: 'update-project',
+                              patch: {
+                                view: {
+                                  length: hmsfPartsToSeconds(
+                                    lengthParts.hours,
+                                    Number(event.target.value) || 0,
+                                    lengthParts.seconds,
+                                    lengthParts.frames,
+                                    syncFpsPreset.fps
+                                  ),
+                                },
+                              },
+                            })
+                          }
+                        />
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="59"
+                          step="1"
+                          placeholder="ss"
+                          value={lengthParts.seconds}
+                          onChange={(event) =>
+                            dispatch({
+                              type: 'update-project',
+                              patch: {
+                                view: {
+                                  length: hmsfPartsToSeconds(
+                                    lengthParts.hours,
+                                    lengthParts.minutes,
+                                    Number(event.target.value) || 0,
+                                    lengthParts.frames,
+                                    syncFpsPreset.fps
+                                  ),
+                                },
+                              },
+                            })
+                          }
+                        />
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                          step="1"
+                          placeholder="ff"
+                          value={lengthParts.frames}
+                          onChange={(event) =>
+                            dispatch({
+                              type: 'update-project',
+                              patch: {
+                                view: {
+                                  length: hmsfPartsToSeconds(
+                                    lengthParts.hours,
+                                    lengthParts.minutes,
+                                    lengthParts.seconds,
+                                    Number(event.target.value) || 0,
+                                    syncFpsPreset.fps
+                                  ),
+                                },
+                              },
+                            })
+                          }
+                        />
+                      </div>
                     </div>
-                    {midiStatus.error && <div className="field__hint">{midiStatus.error}</div>}
-                  </div>
-                </div>
-              )}
 
-              {settingsTab === 'osc' && (
-                <div className="settings-section">
+                    <div className="field">
+                      <label>MIDI In / Out</label>
+                      <div className="field-grid">
+                        <select
+                          className="input input--mono"
+                          value={project.midi?.inputId ?? VIRTUAL_MIDI_INPUT_ID}
+                          onChange={(event) =>
+                            dispatch({
+                              type: 'update-project',
+                              patch: { midi: { inputId: event.target.value } },
+                            })
+                          }
+                        >
+                          <option value={VIRTUAL_MIDI_INPUT_ID}>{VIRTUAL_MIDI_INPUT_NAME}</option>
+                          {midiDevices.inputs.map((device) => (
+                            <option key={device.id} value={device.id}>
+                              {device.name}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          className="input input--mono"
+                          value={project.midi?.outputId ?? VIRTUAL_MIDI_OUTPUT_ID}
+                          onChange={(event) =>
+                            dispatch({
+                              type: 'update-project',
+                              patch: { midi: { outputId: event.target.value } },
+                            })
+                          }
+                        >
+                          <option value={VIRTUAL_MIDI_OUTPUT_ID}>{VIRTUAL_MIDI_OUTPUT_NAME}</option>
+                          {midiDevices.outputs.map((device) => (
+                            <option key={device.id} value={device.id}>
+                              {device.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      {midiStatus.error && <div className="field__hint">{midiStatus.error}</div>}
+                    </div>
+                  </div>
+                )}
+
+                {settingsTab === 'osc' && (
+                  <div className="settings-section">
                   <div className="settings-section__title">OSC Settings</div>
                   <div className="field">
                     <label>OSC Host</label>
@@ -4989,11 +4991,11 @@ export default function App() {
                       OSC ports must not use 5170.
                     </div>
                   )}
-                </div>
-              )}
+                  </div>
+                )}
 
-              {settingsTab === 'audio' && (
-                <div className="settings-section">
+                {settingsTab === 'audio' && (
+                  <div className="settings-section">
                   <div className="settings-section__title">Audio Settings</div>
                   <div className="field">
                     <label>Audio Output</label>
@@ -5110,8 +5112,9 @@ export default function App() {
                       }
                     />
                   </div>
-                </div>
-              )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
