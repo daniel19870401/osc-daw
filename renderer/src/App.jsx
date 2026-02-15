@@ -13,6 +13,7 @@ import {
   TIMELINE_PADDING,
   TIMELINE_WIDTH,
 } from './utils/timelineMetrics.js';
+import { getCurveValueRatioByFps, normalizeCurveMode } from './utils/easingCurves.js';
 
 const AUDIO_BUFFER_SIZES = [128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 const SYNC_FPS_OPTIONS = [
@@ -36,7 +37,9 @@ const ARTNET_PORT = 6454;
 const MAX_AUDIO_CHANNELS = 64;
 const MAX_WEB_AUDIO_OUTPUT_CHANNELS = 32;
 const DEFAULT_OSC_OUTPUT_ID = 'osc-out-main';
+const AUDIO_IMPORT_PROJECT_PADDING_SECONDS = 30;
 const COPYRIGHT_YEAR = new Date().getFullYear();
+const EMPTY_LIST = Object.freeze([]);
 
 const resolveSyncFps = (syncFpsId) => {
   const found = SYNC_FPS_OPTIONS.find((item) => item.id === syncFpsId);
@@ -121,6 +124,18 @@ const formatMidiNoteLabel = (value) => {
   const name = MIDI_NOTE_NAMES[note % 12] || 'C';
   const octave = Math.floor(note / 12) - 2;
   return `${name}${octave}`;
+};
+
+const toMidiCcValue = (value, fallback = 0) => {
+  const numeric = Number(value);
+  const safe = Number.isFinite(numeric) ? numeric : fallback;
+  return clamp(Math.round(safe), 0, 127);
+};
+
+const toDmxValue = (value, fallback = 0) => {
+  const numeric = Number(value);
+  const safe = Number.isFinite(numeric) ? numeric : fallback;
+  return clamp(Math.round(safe), 0, 255);
 };
 
 const normalizeOscAddressPath = (value, fallback = '/osc/value') => {
@@ -381,7 +396,7 @@ const normalizeOscOutputsForUi = (oscSettings) => {
   }];
 };
 
-const sampleOscArrayTrackValues = (track, time) => {
+const sampleOscArrayTrackValues = (track, time, curveFps = 30) => {
   const count = getOscArrayValueCount(track);
   const min = Number.isFinite(track?.min) ? Number(track.min) : 0;
   const max = Number.isFinite(track?.max) ? Number(track.max) : 1;
@@ -400,11 +415,293 @@ const sampleOscArrayTrackValues = (track, time) => {
     const aValues = normalizeOscArrayNodeValues(track, a);
     const bValues = normalizeOscArrayNodeValues(track, b);
     if (Math.abs(b.t - a.t) < 1e-9) return bValues;
-    const ratio = clamp((time - a.t) / (b.t - a.t), 0, 1);
+    const ratio = getCurveValueRatioByFps((time - a.t) / (b.t - a.t), a.curve, curveFps);
     return aValues.map((value, index) => clamp(value + (bValues[index] - value) * ratio, min, max));
   }
   return normalizeOscArrayNodeValues(track, sorted[sorted.length - 1]);
 };
+
+const DEFAULT_OSC_3D_BOUNDS = Object.freeze({
+  xMin: -1,
+  xMax: 1,
+  yMin: -1,
+  yMax: 1,
+  zMin: -1,
+  zMax: 1,
+});
+
+const normalizeOsc3dBounds = (trackOrSettings) => {
+  const raw =
+    trackOrSettings?.osc3d?.bounds
+    || trackOrSettings?.bounds
+    || trackOrSettings
+    || {};
+  const normalizeAxis = (minValue, maxValue, fallbackMin, fallbackMax) => {
+    const min = Number.isFinite(Number(minValue)) ? Number(minValue) : fallbackMin;
+    const max = Number.isFinite(Number(maxValue)) ? Number(maxValue) : fallbackMax;
+    if (min <= max) return { min, max };
+    return { min: max, max: min };
+  };
+  const x = normalizeAxis(raw.xMin, raw.xMax, DEFAULT_OSC_3D_BOUNDS.xMin, DEFAULT_OSC_3D_BOUNDS.xMax);
+  const y = normalizeAxis(raw.yMin, raw.yMax, DEFAULT_OSC_3D_BOUNDS.yMin, DEFAULT_OSC_3D_BOUNDS.yMax);
+  const z = normalizeAxis(raw.zMin, raw.zMax, DEFAULT_OSC_3D_BOUNDS.zMin, DEFAULT_OSC_3D_BOUNDS.zMax);
+  return {
+    xMin: x.min,
+    xMax: x.max,
+    yMin: y.min,
+    yMax: y.max,
+    zMin: z.min,
+    zMax: z.max,
+  };
+};
+
+const getOsc3dDefaultValues = (bounds) => ([
+  (bounds.xMin + bounds.xMax) * 0.5,
+  (bounds.yMin + bounds.yMax) * 0.5,
+  (bounds.zMin + bounds.zMax) * 0.5,
+]);
+
+const normalizeOsc3dNodeValues = (track, node) => {
+  const bounds = normalizeOsc3dBounds(track);
+  const fallback = getOsc3dDefaultValues(bounds);
+  const raw = Array.isArray(node?.arr) ? node.arr : [];
+  const yFromValue = Number.isFinite(Number(node?.v)) ? Number(node.v) : fallback[1];
+  return [
+    clamp(Number.isFinite(Number(raw[0])) ? Number(raw[0]) : fallback[0], bounds.xMin, bounds.xMax),
+    clamp(Number.isFinite(Number(raw[1])) ? Number(raw[1]) : yFromValue, bounds.yMin, bounds.yMax),
+    clamp(Number.isFinite(Number(raw[2])) ? Number(raw[2]) : fallback[2], bounds.zMin, bounds.zMax),
+  ];
+};
+
+const sampleOsc3dTrackValues = (track, time, curveFps = 30) => {
+  const bounds = normalizeOsc3dBounds(track);
+  const fallback = getOsc3dDefaultValues(bounds);
+  if (!track || track.kind !== 'osc-3d') return fallback;
+  const nodes = Array.isArray(track.nodes) ? track.nodes : [];
+  if (!nodes.length) return fallback;
+  const sorted = [...nodes].sort((a, b) => a.t - b.t);
+  if (time <= sorted[0].t) return normalizeOsc3dNodeValues(track, sorted[0]);
+  if (time >= sorted[sorted.length - 1].t) return normalizeOsc3dNodeValues(track, sorted[sorted.length - 1]);
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (time < a.t || time > b.t) continue;
+    const aValues = normalizeOsc3dNodeValues(track, a);
+    const bValues = normalizeOsc3dNodeValues(track, b);
+    if (Math.abs(b.t - a.t) < 1e-9) return bValues;
+    const ratio = getCurveValueRatioByFps((time - a.t) / (b.t - a.t), a.curve, curveFps);
+    return [
+      clamp(aValues[0] + (bValues[0] - aValues[0]) * ratio, bounds.xMin, bounds.xMax),
+      clamp(aValues[1] + (bValues[1] - aValues[1]) * ratio, bounds.yMin, bounds.yMax),
+      clamp(aValues[2] + (bValues[2] - aValues[2]) * ratio, bounds.zMin, bounds.zMax),
+    ];
+  }
+  return normalizeOsc3dNodeValues(track, sorted[sorted.length - 1]);
+};
+
+const OSC3D_CAMERA_DEFAULT = Object.freeze({
+  yaw: 34,
+  pitch: 18,
+  zoom: 1,
+});
+
+const OSC3D_CUBE_VERTICES = [
+  [-1, -1, -1],
+  [1, -1, -1],
+  [1, 1, -1],
+  [-1, 1, -1],
+  [-1, -1, 1],
+  [1, -1, 1],
+  [1, 1, 1],
+  [-1, 1, 1],
+];
+
+const OSC3D_CUBE_EDGES = [
+  [0, 1], [1, 2], [2, 3], [3, 0],
+  [4, 5], [5, 6], [6, 7], [7, 4],
+  [0, 4], [1, 5], [2, 6], [3, 7],
+];
+
+const OSC3D_AXIS_DEFINITIONS = [
+  { id: 'x', label: 'X', color: 'rgba(255, 100, 100, 0.95)', vector: [1, 0, 0] },
+  { id: 'y', label: 'Y', color: 'rgba(100, 255, 120, 0.95)', vector: [0, 1, 0] },
+  { id: 'z', label: 'Z', color: 'rgba(110, 160, 255, 0.95)', vector: [0, 0, 1] },
+];
+
+const rotateOsc3dVector = (vector, yawDeg, pitchDeg) => {
+  const [x, y, z] = vector;
+  const yaw = (Number(yawDeg) || 0) * (Math.PI / 180);
+  const pitch = (Number(pitchDeg) || 0) * (Math.PI / 180);
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const cosP = Math.cos(pitch);
+  const sinP = Math.sin(pitch);
+
+  const x1 = x * cosY - z * sinY;
+  const z1 = x * sinY + z * cosY;
+  const y1 = y * cosP - z1 * sinP;
+  const z2 = y * sinP + z1 * cosP;
+  return { x: x1, y: y1, z: z2 };
+};
+
+const projectOsc3dVector = (vector, camera) => {
+  const rotated = rotateOsc3dVector(vector, camera?.yaw, camera?.pitch);
+  const zoom = clamp(Number(camera?.zoom) || 1, 0.4, 3.2);
+  const perspective = 2.8;
+  const depth = perspective / (perspective + rotated.z + 2.1);
+  const scale = 36 * zoom * depth;
+  return {
+    x: 50 + rotated.x * scale,
+    y: 50 - rotated.y * scale,
+    depth,
+  };
+};
+
+const createOsc3dPreviewGeometry = (ratios, camera) => {
+  const nx = clamp((Number(ratios?.x) || 0) * 2 - 1, -1, 1);
+  const ny = clamp((Number(ratios?.y) || 0) * 2 - 1, -1, 1);
+  const nz = clamp((Number(ratios?.z) || 0) * 2 - 1, -1, 1);
+  const projectedVertices = OSC3D_CUBE_VERTICES.map((vertex) => projectOsc3dVector(vertex, camera));
+  const edges = OSC3D_CUBE_EDGES.map(([from, to], index) => ({
+    id: `edge-${index}`,
+    from: projectedVertices[from],
+    to: projectedVertices[to],
+    depth: (projectedVertices[from].depth + projectedVertices[to].depth) * 0.5,
+  })).sort((a, b) => a.depth - b.depth);
+  const point = projectOsc3dVector([nx, ny, nz], camera);
+  const axisOrigin = projectOsc3dVector([0, 0, 0], camera);
+  const axes = OSC3D_AXIS_DEFINITIONS.map((axis) => {
+    const [vx, vy, vz] = axis.vector;
+    const tip = projectOsc3dVector([vx * 0.3, vy * 0.3, vz * 0.3], camera);
+    const labelPos = projectOsc3dVector([vx * 0.42, vy * 0.42, vz * 0.42], camera);
+    return {
+      ...axis,
+      from: axisOrigin,
+      tip,
+      labelPos,
+      depth: tip.depth,
+    };
+  }).sort((a, b) => a.depth - b.depth);
+  return { edges, point, axes };
+};
+
+const OSC3D_MONITOR_WINDOW_NAME = 'osconductor-osc3d-monitor';
+const OSC3D_MONITOR_HTML = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>3D OSC Monitor</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      padding: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", sans-serif;
+      background: #0b111c;
+      color: #d5e2ff;
+    }
+    .panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      height: 100%;
+    }
+    .title {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #9fb6df;
+    }
+    .track {
+      font-size: 18px;
+      font-weight: 700;
+      color: #e9f3ff;
+      line-height: 1.2;
+    }
+    .meta {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: #a9bfdf;
+    }
+    .xyz {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      color: #7df4e0;
+    }
+    .stage-wrap {
+      position: relative;
+      flex: 1;
+      min-height: 280px;
+      border-radius: 12px;
+      border: 1px solid rgba(115, 156, 220, 0.45);
+      background: radial-gradient(circle at 30% 18%, rgba(38, 61, 99, 0.4), rgba(10, 14, 22, 0.95));
+      overflow: hidden;
+    }
+    .stage-wrap::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        repeating-linear-gradient(to right, transparent 0, transparent 23px, rgba(95, 169, 255, 0.08) 23px, rgba(95, 169, 255, 0.08) 24px),
+        repeating-linear-gradient(to bottom, transparent 0, transparent 23px, rgba(95, 169, 255, 0.08) 23px, rgba(95, 169, 255, 0.08) 24px);
+      pointer-events: none;
+    }
+    .stage-hit {
+      position: absolute;
+      inset: 0;
+      cursor: grab;
+      touch-action: none;
+    }
+    .stage-hit.dragging {
+      cursor: grabbing;
+    }
+    .stage {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    .axis-line {
+      stroke-width: 1.2;
+      vector-effect: non-scaling-stroke;
+      opacity: 0.95;
+    }
+    .axis-label {
+      font-size: 4.2px;
+      font-weight: 700;
+      paint-order: stroke;
+      stroke: rgba(6, 10, 16, 0.92);
+      stroke-width: 1px;
+      vector-effect: non-scaling-stroke;
+      dominant-baseline: middle;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="title">3D OSC Monitor</div>
+    <div class="track" id="osc3d-track-name">No Track</div>
+    <div class="meta">
+      <span id="osc3d-timecode">00:00:00.00</span>
+      <span id="osc3d-range">X -1~1 · Y -1~1 · Z -1~1</span>
+    </div>
+    <div class="xyz" id="osc3d-values">X 0.00  Y 0.00  Z 0.00</div>
+    <div class="stage-wrap">
+      <div id="osc3d-stage-hit" class="stage-hit">
+        <svg id="osc3d-stage" class="stage" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
+          <g id="osc3d-axis"></g>
+          <g id="osc3d-edges"></g>
+          <circle id="osc3d-point" cx="50" cy="50" r="3" fill="rgba(255,180,88,0.96)" stroke="rgba(14,18,28,0.85)" stroke-width="0.7"></circle>
+        </svg>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
 
 export default function App() {
   const [state, dispatch] = useReducer(projectReducer, undefined, createInitialState);
@@ -428,8 +725,16 @@ export default function App() {
   const [dragTrackIds, setDragTrackIds] = useState([]);
   const [dropTarget, setDropTarget] = useState(null);
   const [nameFocusToken, setNameFocusToken] = useState(0);
+  const [editingTrackNameId, setEditingTrackNameId] = useState(null);
+  const [editingTrackName, setEditingTrackName] = useState('');
   const [selectedNodeContext, setSelectedNodeContext] = useState({ trackId: null, nodeIds: [] });
+  const selectedNodeIdsByTrackRef = useRef(new Map());
+  const [selectedNodeIdsByTrack, setSelectedNodeIdsByTrack] = useState({});
+  const [trackEditMarquee, setTrackEditMarquee] = useState(null);
+  const trackEditMarqueeRef = useRef(null);
   const [editingNode, setEditingNode] = useState(null);
+  const [osc3dCamera, setOsc3dCamera] = useState({ ...OSC3D_CAMERA_DEFAULT });
+  const osc3dCameraDragRef = useRef(null);
   const [editingCue, setEditingCue] = useState(null);
   const [editingLoopRange, setEditingLoopRange] = useState(null);
   const [editingAudioClip, setEditingAudioClip] = useState(null);
@@ -470,7 +775,10 @@ export default function App() {
   const playheadRef = useRef(0);
   const isPlayingRef = useRef(false);
   const syncModeRef = useRef(project.timebase?.sync || 'Internal');
+  const syncFpsRef = useRef(resolveSyncFps(project.timebase?.syncFps).fps);
+  const projectCurveFpsRef = useRef(project.timebase?.fps || 30);
   const projectLengthRef = useRef(project.view.length || 0);
+  const projectTracksRef = useRef(project.tracks || []);
   const compositionsRef = useRef(project.compositions || []);
   const activeCompositionIdRef = useRef(project.activeCompositionId || null);
   const compositionPlayheadsRef = useRef(new Map());
@@ -500,6 +808,7 @@ export default function App() {
   const audioRoutingRef = useRef(new Map());
   const audioOutputProbeRef = useRef(new Map());
   const timelineWidthHostRef = useRef(null);
+  const trackLanesPanelRef = useRef(null);
   const resizeHoldUntilRef = useRef(0);
   const resizeIdleTimerRef = useRef(null);
   const midiAccessRef = useRef(null);
@@ -511,6 +820,7 @@ export default function App() {
   const oscFlagPlaybackRef = useRef({ lastTime: null });
   const nativeAudioConfigKeyRef = useRef('');
   const nativeAudioMixKeyRef = useRef('');
+  const osc3dMonitorWindowsRef = useRef(new Map());
   const [audioWaveforms, setAudioWaveforms] = useState({});
 
   const compositions = useMemo(
@@ -538,6 +848,145 @@ export default function App() {
     () => project.tracks.find((track) => track.id === selectedTrackId),
     [project.tracks, selectedTrackId]
   );
+  const {
+    visibleTracks,
+    visibleTrackIdsInOrder,
+    groupMembersById,
+    groupHostByTrackId,
+    groupTrackById,
+  } = useMemo(() => {
+    const members = new Map();
+    const hosts = new Map();
+    const groups = new Map();
+    const rootTracks = [];
+    let legacyActiveGroupId = '';
+
+    project.tracks.forEach((track) => {
+      if (track.kind !== 'group') return;
+      groups.set(track.id, track);
+      members.set(track.id, []);
+      hosts.set(track.id, null);
+    });
+
+    project.tracks.forEach((track) => {
+      if (track.kind === 'group') {
+        rootTracks.push(track);
+        legacyActiveGroupId = track.id;
+        return;
+      }
+      const rawGroupId = typeof track.groupId === 'string' ? track.groupId : '';
+      const groupId = rawGroupId && groups.has(rawGroupId)
+        ? rawGroupId
+        : (track.groupId === null && legacyActiveGroupId ? legacyActiveGroupId : '');
+      if (groupId) {
+        hosts.set(track.id, groupId);
+        members.get(groupId)?.push(track);
+      } else {
+        hosts.set(track.id, null);
+        rootTracks.push(track);
+      }
+    });
+
+    const visible = [];
+    rootTracks.forEach((track) => {
+      visible.push(track);
+      if (track.kind !== 'group') return;
+      if (track.group?.expanded === false) return;
+      const childTracks = members.get(track.id) || [];
+      visible.push(...childTracks);
+    });
+
+    return {
+      visibleTracks: visible,
+      visibleTrackIdsInOrder: visible.map((track) => track.id),
+      groupMembersById: members,
+      groupHostByTrackId: hosts,
+      groupTrackById: groups,
+    };
+  }, [project.tracks]);
+  const expandTrackIdsWithGroupMembers = useCallback((trackIds) => {
+    const source = Array.isArray(trackIds) ? trackIds : [];
+    const expanded = [];
+    const seen = new Set();
+
+    source.forEach((trackId) => {
+      if (!trackId || seen.has(trackId)) return;
+      seen.add(trackId);
+      expanded.push(trackId);
+      const members = groupMembersById.get(trackId);
+      if (!Array.isArray(members) || !members.length) return;
+      members.forEach((member) => {
+        if (!member?.id || seen.has(member.id)) return;
+        seen.add(member.id);
+        expanded.push(member.id);
+      });
+    });
+
+    return expanded;
+  }, [groupMembersById]);
+  const getRenderedTrackHeight = useCallback((track) => {
+    if (!track) return project.view.trackHeight;
+    if (track.kind === 'group') return project.view.trackHeight;
+    const hostId = groupHostByTrackId.get(track.id);
+    if (!hostId) return project.view.trackHeight;
+    return Math.max(Math.round(project.view.trackHeight * 0.82), 58);
+  }, [groupHostByTrackId, project.view.trackHeight]);
+  const syncSelectedNodeSnapshot = useCallback((focusTrackId = null) => {
+    const snapshot = {};
+    selectedNodeIdsByTrackRef.current.forEach((ids, trackId) => {
+      if (!Array.isArray(ids) || !ids.length) return;
+      snapshot[trackId] = [...ids];
+    });
+    setSelectedNodeIdsByTrack((prev) => {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(snapshot);
+      if (prevKeys.length === nextKeys.length) {
+        const same = nextKeys.every((key) => {
+          const a = prev[key] || [];
+          const b = snapshot[key] || [];
+          return a.length === b.length && a.every((id, index) => id === b[index]);
+        });
+        if (same) return prev;
+      }
+      return snapshot;
+    });
+
+    const focusId = (
+      typeof focusTrackId === 'string'
+      && Array.isArray(snapshot[focusTrackId])
+      && snapshot[focusTrackId].length
+    )
+      ? focusTrackId
+      : (
+        (projectTracksRef.current || [])
+          .find((track) => Array.isArray(snapshot[track.id]) && snapshot[track.id].length)?.id
+        || null
+      );
+
+    if (!focusId) {
+      setSelectedNodeContext((prev) => {
+        if (prev.trackId === null && prev.nodeIds.length === 0) return prev;
+        return { trackId: null, nodeIds: [] };
+      });
+      return;
+    }
+    const nodeIds = snapshot[focusId] || [];
+    setSelectedNodeContext((prev) => {
+      const sameTrack = prev.trackId === focusId;
+      const sameLength = prev.nodeIds.length === nodeIds.length;
+      const sameNodes = sameLength && prev.nodeIds.every((id, index) => id === nodeIds[index]);
+      if (sameTrack && sameNodes) return prev;
+      return { trackId: focusId, nodeIds };
+    });
+  }, []);
+  const hasAnyTrackSolo = useMemo(
+    () => project.tracks.some((track) => Boolean(track?.solo)),
+    [project.tracks]
+  );
+  const hasAnyTrackMute = useMemo(
+    () => project.tracks.some((track) => Boolean(track?.mute)),
+    [project.tracks]
+  );
   const selectedInspectorNode = useMemo(() => {
     if (!selectedTrack || selectedTrack.kind !== 'osc-flag') return null;
     if (selectedNodeContext.trackId !== selectedTrack.id) return null;
@@ -555,6 +1004,259 @@ export default function App() {
     () => resolveSyncFps(project.timebase?.syncFps),
     [project.timebase?.syncFps]
   );
+  const editingNodeTrack = useMemo(() => {
+    if (!editingNode?.trackId) return null;
+    return project.tracks.find((track) => track.id === editingNode.trackId) || null;
+  }, [editingNode?.trackId, project.tracks]);
+
+  useEffect(() => {
+    if (editingNode?.mode !== 'osc-3d') return;
+    setOsc3dCamera({ ...OSC3D_CAMERA_DEFAULT });
+    osc3dCameraDragRef.current = null;
+  }, [editingNode?.mode, editingNode?.trackId, editingNode?.nodeId]);
+
+  const renderOsc3dMonitorWindow = useCallback((trackId) => {
+    if (typeof trackId !== 'string' || !trackId) return;
+    const monitors = osc3dMonitorWindowsRef.current;
+    const entry = monitors.get(trackId);
+    if (!entry) return;
+    const monitorWindow = entry.window;
+    if (!monitorWindow || monitorWindow.closed) {
+      if (typeof entry.cleanup === 'function') entry.cleanup();
+      monitors.delete(trackId);
+      return;
+    }
+
+    const tracks = Array.isArray(projectTracksRef.current) ? projectTracksRef.current : [];
+    const track = tracks.find((item) => item.id === trackId && item.kind === 'osc-3d') || null;
+    if (!track) {
+      if (typeof entry.cleanup === 'function') entry.cleanup();
+      if (!monitorWindow.closed) monitorWindow.close();
+      monitors.delete(trackId);
+      return;
+    }
+
+    const doc = monitorWindow.document;
+    if (!doc) return;
+    const nameEl = doc.getElementById('osc3d-track-name');
+    const timecodeEl = doc.getElementById('osc3d-timecode');
+    const rangeEl = doc.getElementById('osc3d-range');
+    const valuesEl = doc.getElementById('osc3d-values');
+    const axisEl = doc.getElementById('osc3d-axis');
+    const edgesEl = doc.getElementById('osc3d-edges');
+    const pointEl = doc.getElementById('osc3d-point');
+    if (!nameEl || !timecodeEl || !rangeEl || !valuesEl || !axisEl || !edgesEl || !pointEl) return;
+
+    const projectLength = Number(projectLengthRef.current) || 0;
+    const timeSec = clamp(Number(playheadRef.current) || 0, 0, projectLength);
+    timecodeEl.textContent = formatHmsfTimecode(timeSec, syncFpsRef.current);
+
+    const bounds = normalizeOsc3dBounds(track);
+    const values = sampleOsc3dTrackValues(track, timeSec, projectCurveFpsRef.current);
+    const valueType = getOscSendValueType(track);
+    const formatAxis = (value) => (
+      valueType === 'int'
+        ? String(Math.round(Number(value) || 0))
+        : Number(value).toFixed(2)
+    );
+
+    const trackName = track.name || '3D OSC';
+    monitorWindow.document.title = `3D OSC Monitor - ${trackName}`;
+    nameEl.textContent = trackName;
+    rangeEl.textContent = `X ${bounds.xMin.toFixed(2)}~${bounds.xMax.toFixed(2)} · Y ${bounds.yMin.toFixed(2)}~${bounds.yMax.toFixed(2)} · Z ${bounds.zMin.toFixed(2)}~${bounds.zMax.toFixed(2)}`;
+    valuesEl.textContent = `X ${formatAxis(values[0])}  Y ${formatAxis(values[1])}  Z ${formatAxis(values[2])}`;
+
+    const toRatio = (value, min, max) => {
+      const span = Math.max(max - min, 1e-9);
+      return clamp((value - min) / span, 0, 1);
+    };
+    const preview = createOsc3dPreviewGeometry({
+      x: toRatio(values[0], bounds.xMin, bounds.xMax),
+      y: toRatio(values[1], bounds.yMin, bounds.yMax),
+      z: toRatio(values[2], bounds.zMin, bounds.zMax),
+    }, entry.camera || OSC3D_CAMERA_DEFAULT);
+
+    axisEl.innerHTML = preview.axes.map((axis) => (
+      `<g>
+        <line x1="${axis.from.x.toFixed(2)}" y1="${axis.from.y.toFixed(2)}" x2="${axis.tip.x.toFixed(2)}" y2="${axis.tip.y.toFixed(2)}" class="axis-line" stroke="${axis.color}" opacity="${clamp(axis.depth, 0.3, 1).toFixed(3)}"></line>
+        <text x="${axis.labelPos.x.toFixed(2)}" y="${axis.labelPos.y.toFixed(2)}" class="axis-label" fill="${axis.color}" opacity="${clamp(axis.depth, 0.45, 1).toFixed(3)}">${axis.label}</text>
+      </g>`
+    )).join('');
+    edgesEl.innerHTML = preview.edges.map((edge) => (
+      `<line x1="${edge.from.x.toFixed(2)}" y1="${edge.from.y.toFixed(2)}" x2="${edge.to.x.toFixed(2)}" y2="${edge.to.y.toFixed(2)}" stroke="rgba(120,210,255,0.8)" stroke-width="0.8" vector-effect="non-scaling-stroke" opacity="${clamp(edge.depth, 0.25, 1).toFixed(3)}"></line>`
+    )).join('');
+    pointEl.setAttribute('cx', preview.point.x.toFixed(2));
+    pointEl.setAttribute('cy', preview.point.y.toFixed(2));
+    pointEl.setAttribute('r', (1.7 + preview.point.depth * 2.2).toFixed(2));
+  }, []);
+
+  const refreshOsc3dMonitorWindows = useCallback((trackId = null) => {
+    const monitors = osc3dMonitorWindowsRef.current;
+    if (!monitors.size) return;
+    Array.from(monitors.entries()).forEach(([id, entry]) => {
+      if (entry?.window && !entry.window.closed) return;
+      if (typeof entry?.cleanup === 'function') entry.cleanup();
+      monitors.delete(id);
+    });
+
+    if (typeof trackId === 'string' && trackId) {
+      renderOsc3dMonitorWindow(trackId);
+      return;
+    }
+    Array.from(monitors.keys()).forEach((id) => renderOsc3dMonitorWindow(id));
+  }, [renderOsc3dMonitorWindow]);
+
+  const attachOsc3dMonitorInteraction = useCallback((trackId) => {
+    if (typeof trackId !== 'string' || !trackId) return;
+    const monitors = osc3dMonitorWindowsRef.current;
+    const entry = monitors.get(trackId);
+    if (!entry) return;
+    const monitorWindow = entry.window;
+    if (!monitorWindow || monitorWindow.closed) return;
+    if (typeof entry.cleanup === 'function') return;
+
+    const doc = monitorWindow.document;
+    const stageHit = doc.getElementById('osc3d-stage-hit');
+    if (!stageHit) return;
+
+    const setDragging = (dragging) => {
+      stageHit.classList.toggle('dragging', dragging);
+    };
+
+    const onPointerMove = (moveEvent) => {
+      const drag = entry.drag;
+      if (!drag) return;
+      const deltaX = moveEvent.clientX - drag.startX;
+      const deltaY = moveEvent.clientY - drag.startY;
+      entry.camera = {
+        yaw: drag.startCamera.yaw + deltaX * 0.35,
+        pitch: clamp(drag.startCamera.pitch - deltaY * 0.35, -85, 85),
+        zoom: drag.startCamera.zoom,
+      };
+      refreshOsc3dMonitorWindows(trackId);
+    };
+
+    const onPointerUp = () => {
+      if (!entry.drag) return;
+      entry.drag = null;
+      setDragging(false);
+    };
+
+    const onPointerDown = (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      entry.drag = {
+        startX: event.clientX,
+        startY: event.clientY,
+        startCamera: { ...(entry.camera || OSC3D_CAMERA_DEFAULT) },
+      };
+      setDragging(true);
+    };
+
+    const onWheel = (event) => {
+      event.preventDefault();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      const camera = entry.camera || OSC3D_CAMERA_DEFAULT;
+      entry.camera = {
+        ...camera,
+        zoom: clamp((Number(camera.zoom) || 1) + direction * 0.08, 0.55, 2.4),
+      };
+      refreshOsc3dMonitorWindows(trackId);
+    };
+
+    const onDoubleClick = () => {
+      entry.camera = { ...OSC3D_CAMERA_DEFAULT };
+      refreshOsc3dMonitorWindows(trackId);
+    };
+
+    const cleanup = () => {
+      setDragging(false);
+      entry.drag = null;
+      stageHit.removeEventListener('pointerdown', onPointerDown);
+      stageHit.removeEventListener('wheel', onWheel);
+      stageHit.removeEventListener('dblclick', onDoubleClick);
+      monitorWindow.removeEventListener('pointermove', onPointerMove);
+      monitorWindow.removeEventListener('pointerup', onPointerUp);
+      monitorWindow.removeEventListener('pointercancel', onPointerUp);
+      monitorWindow.removeEventListener('beforeunload', cleanup);
+      if (entry.cleanup === cleanup) {
+        entry.cleanup = null;
+      }
+      if (monitors.get(trackId) === entry) {
+        monitors.delete(trackId);
+      }
+    };
+
+    stageHit.addEventListener('pointerdown', onPointerDown);
+    stageHit.addEventListener('wheel', onWheel, { passive: false });
+    stageHit.addEventListener('dblclick', onDoubleClick);
+    monitorWindow.addEventListener('pointermove', onPointerMove);
+    monitorWindow.addEventListener('pointerup', onPointerUp);
+    monitorWindow.addEventListener('pointercancel', onPointerUp);
+    monitorWindow.addEventListener('beforeunload', cleanup);
+    entry.cleanup = cleanup;
+  }, [refreshOsc3dMonitorWindows]);
+
+  const openOsc3dMonitor = useCallback((trackId = null) => {
+    if (typeof window === 'undefined') return;
+    const requestedTrackId = typeof trackId === 'string' && trackId
+      ? trackId
+      : (
+        selectedTrack?.kind === 'osc-3d'
+          ? selectedTrack.id
+          : null
+      );
+    if (!requestedTrackId) return;
+
+    const tracks = Array.isArray(projectTracksRef.current) ? projectTracksRef.current : [];
+    const track = tracks.find((item) => item.id === requestedTrackId && item.kind === 'osc-3d');
+    if (!track) return;
+
+    const monitors = osc3dMonitorWindowsRef.current;
+    let entry = monitors.get(requestedTrackId);
+    let monitorWindow = entry?.window;
+
+    if (!monitorWindow || monitorWindow.closed) {
+      monitorWindow = window.open(
+        '',
+        `${OSC3D_MONITOR_WINDOW_NAME}-${requestedTrackId}`,
+        'popup=yes,width=260,height=460,resizable=yes'
+      );
+      if (!monitorWindow) return;
+      monitorWindow.document.open();
+      monitorWindow.document.write(OSC3D_MONITOR_HTML);
+      monitorWindow.document.close();
+      entry = {
+        window: monitorWindow,
+        camera: { ...OSC3D_CAMERA_DEFAULT },
+        drag: null,
+        cleanup: null,
+      };
+      monitors.set(requestedTrackId, entry);
+    }
+
+    attachOsc3dMonitorInteraction(requestedTrackId);
+    if (typeof monitorWindow.focus === 'function') monitorWindow.focus();
+    refreshOsc3dMonitorWindows(requestedTrackId);
+  }, [attachOsc3dMonitorInteraction, refreshOsc3dMonitorWindows, selectedTrack?.id, selectedTrack?.kind]);
+
+  useEffect(() => {
+    refreshOsc3dMonitorWindows();
+  }, [playhead, project.tracks, project.timebase?.fps, syncFpsPreset.fps, refreshOsc3dMonitorWindows]);
+
+  useEffect(() => () => {
+    const monitors = osc3dMonitorWindowsRef.current;
+    Array.from(monitors.entries()).forEach(([trackId, entry]) => {
+      if (typeof entry?.cleanup === 'function') entry.cleanup();
+      const monitorWindow = entry?.window;
+      if (monitorWindow && !monitorWindow.closed) {
+        monitorWindow.close();
+      }
+      monitors.delete(trackId);
+    });
+    monitors.clear();
+  }, []);
+
   const midiOutputOptions = useMemo(
     () => [
       { id: VIRTUAL_MIDI_OUTPUT_ID, name: VIRTUAL_MIDI_OUTPUT_NAME },
@@ -612,25 +1314,61 @@ export default function App() {
   }, [selectedTrackId]);
 
   useEffect(() => {
-    const available = new Set(project.tracks.map((track) => track.id));
+    const visible = new Set(visibleTrackIdsInOrder);
+    if (selectedTrackId && !visible.has(selectedTrackId)) {
+      const hostId = groupHostByTrackId.get(selectedTrackId);
+      const fallbackId = hostId && visible.has(hostId)
+        ? hostId
+        : (visibleTrackIdsInOrder[0] ?? null);
+      if (fallbackId !== selectedTrackId) {
+        dispatch({ type: 'select-track', id: fallbackId });
+      }
+    }
+  }, [dispatch, groupHostByTrackId, selectedTrackId, visibleTrackIdsInOrder]);
+
+  useEffect(() => {
+    const visible = new Set(visibleTrackIdsInOrder);
     setSelectedTrackIds((prev) => {
-      const filtered = prev.filter((id) => available.has(id));
-      if (!selectedTrackId) return filtered;
+      const filtered = prev.filter((id) => visible.has(id));
+      if (!selectedTrackId || !visible.has(selectedTrackId)) return filtered;
       if (!filtered.length) return [selectedTrackId];
       if (!filtered.includes(selectedTrackId)) {
         return [selectedTrackId, ...filtered];
       }
       return filtered;
     });
-  }, [project.tracks, selectedTrackId]);
+  }, [selectedTrackId, visibleTrackIdsInOrder]);
+
+  useEffect(() => {
+    if (!editingTrackNameId) return;
+    const exists = project.tracks.some((track) => track.id === editingTrackNameId);
+    if (exists) return;
+    setEditingTrackNameId(null);
+    setEditingTrackName('');
+  }, [editingTrackNameId, project.tracks]);
 
   useEffect(() => {
     const available = new Set(project.tracks.map((track) => track.id));
+    const map = selectedNodeIdsByTrackRef.current;
+    let changed = false;
+    Array.from(map.keys()).forEach((trackId) => {
+      if (!available.has(trackId)) {
+        map.delete(trackId);
+        changed = true;
+      }
+    });
+    if (changed) {
+      syncSelectedNodeSnapshot(selectedTrackId);
+    }
+  }, [project.tracks, selectedTrackId, syncSelectedNodeSnapshot]);
+
+  useEffect(() => {
+    const available = new Set(visibleTrackIdsInOrder);
     if (selectionAnchorTrackIdRef.current && available.has(selectionAnchorTrackIdRef.current)) return;
     selectionAnchorTrackIdRef.current = selectedTrackId && available.has(selectedTrackId)
       ? selectedTrackId
-      : (project.tracks[0]?.id ?? null);
-  }, [project.tracks, selectedTrackId]);
+      : (visibleTrackIdsInOrder[0] ?? null);
+  }, [selectedTrackId, visibleTrackIdsInOrder]);
 
   useEffect(() => {
     playheadRef.current = playhead;
@@ -645,8 +1383,20 @@ export default function App() {
   }, [project.timebase?.sync]);
 
   useEffect(() => {
+    syncFpsRef.current = Number(syncFpsPreset.fps) || 30;
+  }, [syncFpsPreset.fps]);
+
+  useEffect(() => {
+    projectCurveFpsRef.current = Number(project.timebase?.fps) || 30;
+  }, [project.timebase?.fps]);
+
+  useEffect(() => {
     projectLengthRef.current = Number(project.view.length) || 0;
   }, [project.view.length]);
+
+  useEffect(() => {
+    projectTracksRef.current = Array.isArray(project.tracks) ? project.tracks : [];
+  }, [project.tracks]);
 
   useEffect(() => {
     compositionsRef.current = Array.isArray(project.compositions) ? project.compositions : [];
@@ -1686,7 +2436,7 @@ export default function App() {
         const cues = (Array.isArray(cueList) ? cueList : []).slice().sort((a, b) => a.t - b.t);
         const targetCue = cues[cueNumber - 1];
         if (!targetCue) return;
-        const safeView = view || { start: 0, end: 8, length: 3600 };
+        const safeView = view || { start: 0, end: 8, length: 600 };
         const cueTime = clamp(Number(targetCue.t) || 0, 0, Math.max(Number(safeView.length) || 0, 0));
         if (isPlayingRef.current && (syncModeRef.current || 'Internal') === 'Internal') {
           startInternalClock(cueTime);
@@ -1841,7 +2591,11 @@ export default function App() {
       const b = nodes[i + 1];
       if (time >= a.t && time <= b.t) {
         if (a.t === b.t) return clamp(b.v, track.min, track.max);
-        const ratio = (time - a.t) / (b.t - a.t);
+        const ratio = getCurveValueRatioByFps(
+          (time - a.t) / (b.t - a.t),
+          a.curve,
+          project.timebase?.fps
+        );
         const value = a.v + ratio * (b.v - a.v);
         return clamp(value, track.min, track.max);
       }
@@ -1850,10 +2604,11 @@ export default function App() {
   };
 
   const isTrackEnabled = (track, kind) => {
-    if (track.kind !== kind) return false;
+    if (!track || track.kind !== kind) return false;
+    // Mute must always win.
     if (track.mute) return false;
-    const sameKind = project.tracks.filter((item) => item.kind === kind);
-    const hasSolo = sameKind.some((item) => item.solo);
+    // Solo works globally across all tracks.
+    const hasSolo = project.tracks.some((item) => Boolean(item?.solo) && !Boolean(item?.mute));
     if (!hasSolo) return true;
     return Boolean(track.solo);
   };
@@ -2906,6 +3661,20 @@ export default function App() {
         },
       },
     });
+
+    const clipStart = Math.max(Number(track.audio?.clipStart) || 0, 0);
+    const requiredProjectLength = clipStart + Math.max(Number(duration) || 0, 0) + AUDIO_IMPORT_PROJECT_PADDING_SECONDS;
+    const currentProjectLength = Math.max(Number(project.view.length) || 0, 0);
+    if (requiredProjectLength > currentProjectLength + 0.0001) {
+      dispatch({
+        type: 'update-project',
+        patch: {
+          view: {
+            length: requiredProjectLength,
+          },
+        },
+      });
+    }
   };
 
   useEffect(() => {
@@ -3085,6 +3854,7 @@ export default function App() {
       const bridge = window.oscDaw;
       if (!bridge || typeof bridge.sendOscMessage !== 'function') return;
       project.tracks.forEach((track) => {
+        if (track.mute) return;
         const address = typeof track.oscAddress === 'string' ? track.oscAddress.trim() : '';
         if (!address) return;
         const output = resolveOutput(track);
@@ -3100,7 +3870,20 @@ export default function App() {
         if (track.kind === 'osc-array') {
           if (!isTrackEnabled(track, 'osc-array')) return;
           const valueType = getOscSendValueType(track);
-          const values = formatOscOutputArray(sampleOscArrayTrackValues(track, playheadRef.current), valueType);
+          const values = formatOscOutputArray(
+            sampleOscArrayTrackValues(track, playheadRef.current, project.timebase?.fps),
+            valueType
+          );
+          bridge.sendOscMessage({ host, port, address, value: values, valueType });
+          return;
+        }
+        if (track.kind === 'osc-3d') {
+          if (!isTrackEnabled(track, 'osc-3d')) return;
+          const valueType = getOscSendValueType(track);
+          const values = formatOscOutputArray(
+            sampleOsc3dTrackValues(track, playheadRef.current, project.timebase?.fps),
+            valueType
+          );
           bridge.sendOscMessage({ host, port, address, value: values, valueType });
         }
       });
@@ -3137,6 +3920,7 @@ export default function App() {
       const currentTime = playheadRef.current;
       project.tracks.forEach((track) => {
         if (track.kind !== 'osc-color') return;
+        if (track.mute) return;
         if (!isTrackEnabled(track, 'osc-color')) return;
         const output = resolveOutput(track);
         const host = output.host || '127.0.0.1';
@@ -3235,7 +4019,9 @@ export default function App() {
 
       project.tracks.forEach((track) => {
         if (track.kind !== 'osc-flag') return;
+        if (track.mute) return;
         if (!isTrackEnabled(track, 'osc-flag')) return;
+        const valueType = getOscSendValueType(track);
         const output = resolveOutput(track);
         const host = output.host || '127.0.0.1';
         const port = Number(output.port) || 9000;
@@ -3246,7 +4032,7 @@ export default function App() {
           if (!Number.isFinite(triggerStart)) return;
           const triggerDuration = Math.max(Number(node?.d) || 1, 0);
           const triggerValueRaw = Number.isFinite(Number(node?.v)) ? Number(node.v) : 1;
-          const triggerValue = Math.round(triggerValueRaw * 100) / 100;
+          const triggerValue = formatOscOutputScalar(triggerValueRaw, valueType);
 
           const isStartTriggered = isTriggered(triggerStart);
           const inActiveWindow = triggerDuration > epsilon
@@ -3254,11 +4040,9 @@ export default function App() {
           if (!isStartTriggered && !inActiveWindow) return;
 
           const baseAddress = normalizeOscAddressPath(node?.a, fallbackAddress).replace(/\/+$/, '');
-          const valueText = Number.isInteger(triggerValue)
-            ? String(triggerValue)
-            : String(triggerValue);
+          const valueText = String(triggerValue);
           const address = `${baseAddress}/${valueText}`;
-          bridge.sendOscMessage({ host, port, address, value: triggerValue });
+          bridge.sendOscMessage({ host, port, address, value: triggerValue, valueType });
         });
       });
 
@@ -3293,6 +4077,7 @@ export default function App() {
       const currentTime = playheadRef.current;
 
       project.tracks.forEach((track) => {
+        if (track.mute) return;
         if (track.kind !== 'dmx' && track.kind !== 'dmx-color') return;
         if (!isTrackEnabled(track, track.kind)) return;
 
@@ -3409,6 +4194,7 @@ export default function App() {
       const activeCcTrackIds = new Set();
       project.tracks.forEach((track) => {
         if (track.kind !== 'midi') return;
+        if (track.mute) return;
         activeCcTrackIds.add(track.id);
         const outputId = getMidiTrackOutputId(track);
         const channel = Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1))) - 1;
@@ -3430,6 +4216,7 @@ export default function App() {
       const activeNoteKeys = new Set();
       project.tracks.forEach((track) => {
         if (track.kind !== 'midi-note') return;
+        if (track.mute) return;
         if (!isTrackEnabled(track, 'midi-note')) return;
         const outputId = getMidiTrackOutputId(track);
         const channel = Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1))) - 1;
@@ -3867,34 +4654,60 @@ export default function App() {
       }
       const key = event.key?.toLowerCase();
       const withCommand = event.metaKey || event.ctrlKey;
+      if (withCommand && key === 's') {
+        event.preventDefault();
+        handleSave();
+        return;
+      }
+      if (withCommand && key === 'l') {
+        event.preventDefault();
+        handleLoad();
+        return;
+      }
       if (withCommand && key === 'c') {
         event.preventDefault();
-        const hasSelectedNodes =
-          selectedNodeContext.trackId
-          && Array.isArray(selectedNodeContext.nodeIds)
-          && selectedNodeContext.nodeIds.length > 0;
-        if (hasSelectedNodes) {
-          const sourceTrack = project.tracks.find((track) => track.id === selectedNodeContext.trackId);
-          if (!sourceTrack || !Array.isArray(sourceTrack.nodes)) return;
-          const nodeSet = new Set(selectedNodeContext.nodeIds);
-          const nodes = sourceTrack.nodes
-            .filter((node) => nodeSet.has(node.id))
-            .map((node) => ({
-              t: node.t,
-              v: node.v,
-              arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
-              a: node.a,
-              d: node.d,
-              y: node.y,
-              c: node.c,
-              curve: node.curve || 'linear',
-            }))
-            .sort((a, b) => a.t - b.t);
-          if (!nodes.length) return;
+        const selectedNodeTracks = Array.from(selectedNodeIdsByTrackRef.current.entries())
+          .map(([trackId, nodeIds]) => {
+            if (!trackId || !Array.isArray(nodeIds) || !nodeIds.length) return null;
+            const sourceTrack = project.tracks.find((track) => track.id === trackId);
+            if (!sourceTrack || sourceTrack.kind === 'audio' || sourceTrack.kind === 'group') return null;
+            if (!Array.isArray(sourceTrack.nodes) || !sourceTrack.nodes.length) return null;
+            const nodeSet = new Set(nodeIds);
+            const nodes = sourceTrack.nodes
+              .filter((node) => nodeSet.has(node.id))
+              .map((node) => ({
+                id: node.id,
+                t: node.t,
+                v: node.v,
+                arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
+                a: node.a,
+                d: node.d,
+                y: node.y,
+                c: node.c,
+                curve: node.curve || 'linear',
+              }))
+              .sort((a, b) => a.t - b.t);
+            if (!nodes.length) return null;
+            return {
+              sourceTrackId: sourceTrack.id,
+              kind: sourceTrack.kind,
+              nodes,
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => {
+            const aIndex = project.tracks.findIndex((track) => track.id === a.sourceTrackId);
+            const bIndex = project.tracks.findIndex((track) => track.id === b.sourceTrackId);
+            return aIndex - bIndex;
+          });
+
+        if (selectedNodeTracks.length) {
+          const allTimes = selectedNodeTracks.flatMap((item) => item.nodes.map((node) => Number(node.t) || 0));
+          const baseTime = allTimes.length ? Math.min(...allTimes) : 0;
           clipboardRef.current = {
             type: 'nodes',
-            sourceTrackId: sourceTrack.id,
-            nodes,
+            tracks: selectedNodeTracks,
+            baseTime,
           };
           return;
         }
@@ -3910,6 +4723,81 @@ export default function App() {
           .map((track) => JSON.parse(JSON.stringify(track)));
         if (!tracks.length) return;
         clipboardRef.current = { type: 'tracks', tracks };
+        return;
+      }
+      if (withCommand && key === 'x') {
+        event.preventDefault();
+        const selectedNodeTracks = Array.from(selectedNodeIdsByTrackRef.current.entries())
+          .map(([trackId, nodeIds]) => {
+            if (!trackId || !Array.isArray(nodeIds) || !nodeIds.length) return null;
+            const sourceTrack = project.tracks.find((track) => track.id === trackId);
+            if (!sourceTrack || sourceTrack.kind === 'audio' || sourceTrack.kind === 'group') return null;
+            if (!Array.isArray(sourceTrack.nodes) || !sourceTrack.nodes.length) return null;
+            const nodeSet = new Set(nodeIds);
+            const nodes = sourceTrack.nodes
+              .filter((node) => nodeSet.has(node.id))
+              .map((node) => ({
+                id: node.id,
+                t: node.t,
+                v: node.v,
+                arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
+                a: node.a,
+                d: node.d,
+                y: node.y,
+                c: node.c,
+                curve: node.curve || 'linear',
+              }))
+              .sort((a, b) => a.t - b.t);
+            if (!nodes.length) return null;
+            return {
+              sourceTrackId: sourceTrack.id,
+              kind: sourceTrack.kind,
+              nodes,
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => {
+            const aIndex = project.tracks.findIndex((track) => track.id === a.sourceTrackId);
+            const bIndex = project.tracks.findIndex((track) => track.id === b.sourceTrackId);
+            return aIndex - bIndex;
+          });
+        if (!selectedNodeTracks.length) return;
+        const allTimes = selectedNodeTracks.flatMap((item) => item.nodes.map((node) => Number(node.t) || 0));
+        const baseTime = allTimes.length ? Math.min(...allTimes) : 0;
+        clipboardRef.current = {
+          type: 'nodes',
+          tracks: selectedNodeTracks,
+          baseTime,
+        };
+
+        const nodeIdMap = new Map(
+          selectedNodeTracks.map((entry) => [
+            entry.sourceTrackId,
+            new Set(entry.nodes.map((node) => node.id).filter(Boolean)),
+          ])
+        );
+        let changed = false;
+        const nextTracks = project.tracks.map((track) => {
+          const ids = nodeIdMap.get(track.id);
+          if (!ids || !Array.isArray(track.nodes) || !track.nodes.length) return track;
+          const nextNodes = track.nodes.filter((node) => !ids.has(node.id));
+          if (nextNodes.length === track.nodes.length) return track;
+          changed = true;
+          return {
+            ...track,
+            nodes: nextNodes,
+          };
+        });
+        if (changed) {
+          dispatch({
+            type: 'update-project',
+            patch: {
+              tracks: nextTracks,
+            },
+          });
+        }
+        selectedNodeIdsByTrackRef.current.clear();
+        syncSelectedNodeSnapshot();
         return;
       }
       if (withCommand && key === 'v') {
@@ -3938,14 +4826,98 @@ export default function App() {
           return;
         }
         if (payload.type === 'nodes') {
+          const copiedTracks = Array.isArray(payload.tracks) ? payload.tracks.filter(Boolean) : [];
+          if (copiedTracks.length) {
+            const validTracks = copiedTracks.filter((entry) => (
+              entry
+              && typeof entry.sourceTrackId === 'string'
+              && entry.sourceTrackId
+              && typeof entry.kind === 'string'
+              && entry.kind
+              && Array.isArray(entry.nodes)
+              && entry.nodes.length
+            ));
+            if (!validTracks.length) return;
+            const copiedTimes = validTracks.flatMap((entry) => entry.nodes.map((node) => Number(node.t) || 0));
+            const baseTime = Number.isFinite(Number(payload.baseTime))
+              ? Number(payload.baseTime)
+              : (copiedTimes.length ? Math.min(...copiedTimes) : 0);
+
+            if (validTracks.length > 1) {
+              validTracks.forEach((entry) => {
+                const targetTrack = project.tracks.find((track) => (
+                  track.id === entry.sourceTrackId
+                  && track.kind === entry.kind
+                  && track.kind !== 'audio'
+                  && track.kind !== 'group'
+                ));
+                if (!targetTrack) return;
+                const nodes = entry.nodes.map((node) => ({
+                  t: clamp(playhead + ((Number(node.t) || 0) - baseTime), 0, project.view.length),
+                  v: Number(node.v) || 0,
+                  arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
+                  a: node.a,
+                  d: node.d,
+                  y: node.y,
+                  c: node.c,
+                  curve: node.curve || 'linear',
+                }));
+                if (!nodes.length) return;
+                dispatch({ type: 'add-nodes', id: targetTrack.id, nodes });
+              });
+              return;
+            }
+
+            const copiedTrack = validTracks[0];
+            const selectedTrack = project.tracks.find((track) => track.id === selectedTrackId);
+            const sourceTrack = project.tracks.find((track) => (
+              track.id === copiedTrack.sourceTrackId
+              && track.kind === copiedTrack.kind
+            ));
+            let targetTrack = null;
+            if (
+              selectedTrack
+              && selectedTrack.kind === copiedTrack.kind
+              && selectedTrack.kind !== 'audio'
+              && selectedTrack.kind !== 'group'
+            ) {
+              targetTrack = selectedTrack;
+            } else if (sourceTrack && sourceTrack.kind !== 'audio' && sourceTrack.kind !== 'group') {
+              targetTrack = sourceTrack;
+            }
+            if (!targetTrack) return;
+            const nodes = copiedTrack.nodes.map((node) => ({
+              t: clamp(playhead + ((Number(node.t) || 0) - baseTime), 0, project.view.length),
+              v: Number(node.v) || 0,
+              arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
+              a: node.a,
+              d: node.d,
+              y: node.y,
+              c: node.c,
+              curve: node.curve || 'linear',
+            }));
+            dispatch({ type: 'add-nodes', id: targetTrack.id, nodes });
+            if (selectedTrackId !== targetTrack.id) {
+              dispatch({ type: 'select-track', id: targetTrack.id });
+            }
+            return;
+          }
+
+          // Backward compatibility for old clipboard payload shape.
           const copiedNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
           if (!copiedNodes.length) return;
           const selectedTrack = project.tracks.find((track) => track.id === selectedTrackId);
           const sourceTrack = project.tracks.find((track) => track.id === payload.sourceTrackId);
           let targetTrack = null;
-          if (selectedTrack && selectedTrack.kind !== 'audio') {
+          if (
+            selectedTrack
+            && sourceTrack
+            && selectedTrack.kind === sourceTrack.kind
+            && selectedTrack.kind !== 'audio'
+            && selectedTrack.kind !== 'group'
+          ) {
             targetTrack = selectedTrack;
-          } else if (sourceTrack && sourceTrack.kind !== 'audio') {
+          } else if (sourceTrack && sourceTrack.kind !== 'audio' && sourceTrack.kind !== 'group') {
             targetTrack = sourceTrack;
           }
           if (!targetTrack) return;
@@ -4020,26 +4992,38 @@ export default function App() {
         handlePlayToggle();
         return;
       }
-      if ((event.key === 'Backspace' || event.key === 'Delete') && selectedTrackId) {
+      if (event.key === 'Backspace' || event.key === 'Delete') {
         event.preventDefault();
-        const hasSelectedNodes =
-          selectedNodeContext.trackId === selectedTrackId
-          && Array.isArray(selectedNodeContext.nodeIds)
-          && selectedNodeContext.nodeIds.length > 0;
-        if (hasSelectedNodes) {
-          dispatch({
-            type: 'delete-nodes',
-            id: selectedTrackId,
-            nodeIds: selectedNodeContext.nodeIds,
+        const selectedNodeEntries = Array.from(selectedNodeIdsByTrackRef.current.entries())
+          .filter(([trackId, nodeIds]) => {
+            if (!trackId || !Array.isArray(nodeIds) || !nodeIds.length) return false;
+            const track = project.tracks.find((item) => item.id === trackId);
+            return Boolean(track && track.kind !== 'audio');
           });
-          setSelectedNodeContext((prev) => ({ ...prev, nodeIds: [] }));
+
+        if (selectedNodeEntries.length) {
+          const nodeIdMap = new Map(
+            selectedNodeEntries.map(([trackId, nodeIds]) => [trackId, new Set(nodeIds)])
+          );
+          const nextTracks = project.tracks.map((track) => {
+            const ids = nodeIdMap.get(track.id);
+            if (!ids || !Array.isArray(track.nodes) || !track.nodes.length) return track;
+            return {
+              ...track,
+              nodes: track.nodes.filter((node) => !ids.has(node.id)),
+            };
+          });
+          dispatch({
+            type: 'update-project',
+            patch: {
+              tracks: nextTracks,
+            },
+          });
+          selectedNodeIdsByTrackRef.current.clear();
+          syncSelectedNodeSnapshot();
           return;
         }
-        const existing = new Set(project.tracks.map((track) => track.id));
-        const ids = selectedTrackIds.filter((id) => existing.has(id));
-        const targetIds = ids.length
-          ? ids
-          : (selectedTrackId && existing.has(selectedTrackId) ? [selectedTrackId] : []);
+        const targetIds = getTracksToDelete();
         if (!targetIds.length) return;
         if (targetIds.length === 1) {
           dispatch({ type: 'delete-track', id: targetIds[0] });
@@ -4113,6 +5097,7 @@ export default function App() {
     project.view.length,
     syncFpsPreset.fps,
     audioChannelMapDraft,
+    syncSelectedNodeSnapshot,
   ]);
 
   useEffect(() => {
@@ -4255,13 +5240,54 @@ export default function App() {
     dispatch({ type: 'update-track', id: trackId, patch: { solo: !track.solo } });
   };
 
+  const clearAllTrackSolo = () => {
+    if (!hasAnyTrackSolo) return;
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: project.tracks.map((track) => (
+          track.solo ? { ...track, solo: false } : track
+        )),
+      },
+    });
+  };
+
+  const clearAllTrackMute = () => {
+    if (!hasAnyTrackMute) return;
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: project.tracks.map((track) => (
+          track.mute ? { ...track, mute: false } : track
+        )),
+      },
+    });
+  };
+
+  const toggleGroupExpanded = (trackId) => {
+    const track = project.tracks.find((item) => item.id === trackId);
+    if (!track || track.kind !== 'group') return;
+    const expanded = track.group?.expanded !== false;
+    dispatch({
+      type: 'update-track',
+      id: trackId,
+      patch: {
+        group: {
+          expanded: !expanded,
+        },
+      },
+    });
+  };
+
   const getTracksToDelete = useCallback(() => {
     const existing = new Set(project.tracks.map((track) => track.id));
     const ids = selectedTrackIds.filter((id) => existing.has(id));
-    if (ids.length) return ids;
-    if (selectedTrackId && existing.has(selectedTrackId)) return [selectedTrackId];
+    if (ids.length) return expandTrackIdsWithGroupMembers(ids);
+    if (selectedTrackId && existing.has(selectedTrackId)) {
+      return expandTrackIdsWithGroupMembers([selectedTrackId]);
+    }
     return [];
-  }, [project.tracks, selectedTrackIds, selectedTrackId]);
+  }, [expandTrackIdsWithGroupMembers, project.tracks, selectedTrackIds, selectedTrackId]);
 
   const handleDeleteTrack = () => {
     const ids = getTracksToDelete();
@@ -4273,22 +5299,221 @@ export default function App() {
     dispatch({ type: 'delete-tracks', ids });
   };
 
+  const handleDeleteNodes = useCallback((trackId, nodeIds) => {
+    const ids = Array.from(new Set((Array.isArray(nodeIds) ? nodeIds : []).filter(Boolean)));
+    if (!trackId || !ids.length) return;
+    const idSet = new Set(ids);
+    let changed = false;
+    const nextTracks = project.tracks.map((track) => {
+      if (track.id !== trackId || track.kind === 'audio' || !Array.isArray(track.nodes)) return track;
+      const nextNodes = track.nodes.filter((node) => !idSet.has(node.id));
+      if (nextNodes.length === track.nodes.length) return track;
+      changed = true;
+      return {
+        ...track,
+        nodes: nextNodes,
+      };
+    });
+    if (!changed) return;
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: nextTracks,
+      },
+    });
+    const selectedMap = selectedNodeIdsByTrackRef.current;
+    const selectedIds = selectedMap.get(trackId);
+    if (Array.isArray(selectedIds) && selectedIds.length) {
+      const remaining = selectedIds.filter((id) => !idSet.has(id));
+      if (remaining.length) {
+        selectedMap.set(trackId, remaining);
+      } else {
+        selectedMap.delete(trackId);
+      }
+      syncSelectedNodeSnapshot();
+    }
+  }, [dispatch, project.tracks, syncSelectedNodeSnapshot]);
+
+  const handleSetNodeCurve = useCallback((trackId, nodeIds, curveMode) => {
+    const ids = Array.from(new Set((Array.isArray(nodeIds) ? nodeIds : []).filter(Boolean)));
+    if (!trackId || !ids.length) return;
+    const curve = normalizeCurveMode(curveMode);
+    const idSet = new Set(ids);
+    let changed = false;
+    const nextTracks = project.tracks.map((track) => {
+      if (track.id !== trackId || track.kind === 'audio' || track.kind === 'group' || !Array.isArray(track.nodes)) {
+        return track;
+      }
+      const nextNodes = track.nodes.map((node) => {
+        if (!idSet.has(node.id)) return node;
+        if ((node.curve || 'linear') === curve) return node;
+        changed = true;
+        return { ...node, curve };
+      });
+      if (!changed) return track;
+      return {
+        ...track,
+        nodes: nextNodes,
+      };
+    });
+    if (!changed) return;
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: nextTracks,
+      },
+    });
+  }, [dispatch, project.tracks]);
+
   const handleMoveTrack = (sourceId, targetId, position = 'before') => {
     if (!sourceId || !targetId || sourceId === targetId) return;
-    dispatch({ type: 'move-track', sourceId, targetId, position });
+    const targetTrack = project.tracks.find((track) => track.id === targetId);
+    if (!targetTrack) return;
+    const targetGroupId = targetTrack.kind === 'group'
+      ? ''
+      : (groupHostByTrackId.get(targetTrack.id) || '');
+    const sourceSet = new Set([sourceId]);
+    const moving = project.tracks.filter((track) => sourceSet.has(track.id));
+    if (!moving.length) return;
+    const remaining = project.tracks.filter((track) => !sourceSet.has(track.id));
+    const targetIndex = remaining.findIndex((track) => track.id === targetId);
+    if (targetIndex < 0) return;
+    const insertAt = position === 'after' ? targetIndex + 1 : targetIndex;
+    const nextTracks = [...remaining];
+    nextTracks.splice(
+      clamp(insertAt, 0, nextTracks.length),
+      0,
+      ...moving.map((track) => {
+        if (track.kind === 'group') {
+          return track.groupId ? { ...track, groupId: '' } : track;
+        }
+        const nextGroupId = typeof targetGroupId === 'string' ? targetGroupId : '';
+        return track.groupId === nextGroupId ? track : { ...track, groupId: nextGroupId };
+      })
+    );
+    dispatch({
+      type: 'update-project',
+      patch: { tracks: nextTracks },
+    });
   };
 
   const handleMoveTrackGroup = (sourceIds, targetId, position = 'after') => {
     const ids = Array.isArray(sourceIds) ? sourceIds.filter(Boolean) : [];
     if (!ids.length || !targetId) return;
-    dispatch({ type: 'move-tracks', sourceIds: ids, targetId, position });
+    const sourceSet = new Set(ids);
+    const moving = project.tracks.filter((track) => sourceSet.has(track.id));
+    if (!moving.length) return;
+    const remaining = project.tracks.filter((track) => !sourceSet.has(track.id));
+    const targetIndex = remaining.findIndex((track) => track.id === targetId);
+    if (targetIndex < 0) return;
+    const targetTrack = remaining[targetIndex];
+    const targetGroupId = targetTrack?.kind === 'group'
+      ? ''
+      : (groupHostByTrackId.get(targetTrack?.id) || '');
+    const containsGroup = moving.some((track) => track.kind === 'group');
+    const patchedMoving = moving.map((track) => {
+      if (track.kind === 'group') {
+        return track.groupId ? { ...track, groupId: '' } : track;
+      }
+      if (containsGroup) return track;
+      const nextGroupId = typeof targetGroupId === 'string' ? targetGroupId : '';
+      return track.groupId === nextGroupId ? track : { ...track, groupId: nextGroupId };
+    });
+    const insertAt = position === 'before' ? targetIndex : targetIndex + 1;
+    const nextTracks = [...remaining];
+    nextTracks.splice(clamp(insertAt, 0, nextTracks.length), 0, ...patchedMoving);
+    dispatch({
+      type: 'update-project',
+      patch: { tracks: nextTracks },
+    });
+  };
+
+  const handleMoveTracksAtGroupBoundary = (sourceIds, groupId, position = 'after') => {
+    const ids = Array.isArray(sourceIds) ? sourceIds.filter(Boolean) : [];
+    if (!ids.length || !groupId) return;
+    const groupTrack = project.tracks.find((track) => track.id === groupId && track.kind === 'group');
+    if (!groupTrack) return;
+    const sourceSet = new Set(ids);
+    const moving = project.tracks.filter((track) => sourceSet.has(track.id));
+    if (!moving.length) return;
+    const remaining = project.tracks.filter((track) => !sourceSet.has(track.id));
+    let insertAt = 0;
+    if (position === 'before') {
+      insertAt = remaining.findIndex((track) => track.id === groupId);
+      if (insertAt < 0) return;
+    } else {
+      const groupMembers = remaining.filter((track) => track.kind !== 'group' && track.groupId === groupId);
+      if (groupMembers.length) {
+        const anchorId = groupMembers[groupMembers.length - 1].id;
+        const anchorIndex = remaining.findIndex((track) => track.id === anchorId);
+        if (anchorIndex < 0) return;
+        insertAt = anchorIndex + 1;
+      } else {
+        const groupIndex = remaining.findIndex((track) => track.id === groupId);
+        if (groupIndex < 0) return;
+        insertAt = groupIndex + 1;
+      }
+    }
+    const patchedMoving = moving.map((track) => {
+      if (track.kind === 'group') return track.groupId ? { ...track, groupId: '' } : track;
+      return track.groupId ? { ...track, groupId: '' } : track;
+    });
+    const nextTracks = [...remaining];
+    nextTracks.splice(clamp(insertAt, 0, nextTracks.length), 0, ...patchedMoving);
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: nextTracks,
+      },
+    });
+  };
+
+  const handleMoveTracksIntoGroup = (sourceIds, groupId) => {
+    const group = project.tracks.find((track) => track.id === groupId && track.kind === 'group');
+    if (!group) return;
+
+    const expandedSourceIds = expandTrackIdsWithGroupMembers(sourceIds);
+    if (!expandedSourceIds.length) return;
+    if (expandedSourceIds.includes(groupId)) return;
+    const sourceTracks = expandedSourceIds
+      .map((id) => project.tracks.find((track) => track.id === id))
+      .filter(Boolean);
+    if (sourceTracks.some((track) => track.kind === 'group')) return;
+    const sourceSet = new Set(sourceTracks.map((track) => track.id));
+    if (!sourceSet.size) return;
+    const moving = project.tracks.filter((track) => sourceSet.has(track.id));
+    if (!moving.length) return;
+    const remaining = project.tracks.filter((track) => !sourceSet.has(track.id));
+    const groupMembers = remaining.filter((track) => track.kind !== 'group' && track.groupId === groupId);
+    let insertAt = 0;
+    if (groupMembers.length) {
+      const anchorId = groupMembers[groupMembers.length - 1].id;
+      const anchorIndex = remaining.findIndex((track) => track.id === anchorId);
+      if (anchorIndex < 0) return;
+      insertAt = anchorIndex + 1;
+    } else {
+      const groupIndex = remaining.findIndex((track) => track.id === groupId);
+      if (groupIndex < 0) return;
+      insertAt = groupIndex + 1;
+    }
+    const patchedMoving = moving.map((track) => (
+      track.groupId === groupId ? track : { ...track, groupId }
+    ));
+    const nextTracks = [...remaining];
+    nextTracks.splice(clamp(insertAt, 0, nextTracks.length), 0, ...patchedMoving);
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: nextTracks,
+      },
+    });
   };
 
   const handleTrackRowSelect = (trackId, event = null) => {
     if (!trackId) return;
     const shiftPressed = Boolean(event?.shiftKey);
     const ctrlPressed = Boolean(event?.ctrlKey || event?.metaKey);
-    const trackIdsInOrder = project.tracks.map((track) => track.id);
+    const trackIdsInOrder = visibleTrackIdsInOrder;
     const clickedIndex = trackIdsInOrder.indexOf(trackId);
     if (clickedIndex < 0) return;
 
@@ -4341,6 +5566,83 @@ export default function App() {
     setSelectedTrackIds([trackId]);
   };
 
+  const beginTrackInlineRename = (track) => {
+    if (!track?.id) return;
+    handleTrackRowSelect(track.id);
+    setEditingTrackNameId(track.id);
+    setEditingTrackName(typeof track.name === 'string' ? track.name : '');
+  };
+
+  const cancelTrackInlineRename = () => {
+    setEditingTrackNameId(null);
+    setEditingTrackName('');
+  };
+
+  const commitTrackInlineRename = (trackId = editingTrackNameId) => {
+    if (!trackId) return;
+    const track = project.tracks.find((item) => item.id === trackId);
+    if (!track) {
+      cancelTrackInlineRename();
+      return;
+    }
+    const trimmed = (editingTrackName || '').trim();
+    if (!trimmed || trimmed === track.name) {
+      cancelTrackInlineRename();
+      return;
+    }
+    dispatch({
+      type: 'update-track',
+      id: trackId,
+      patch: { name: trimmed },
+    });
+    cancelTrackInlineRename();
+  };
+
+  const getGroupedChildSummary = (track) => {
+    if (!track) return '';
+    if (track.kind === 'audio') {
+      const clip = track.audio?.name || 'No audio';
+      return `Audio · ${clip}`;
+    }
+    if (track.kind === 'osc') {
+      return `OSC ${Number(track.min ?? 0).toFixed(2)}~${Number(track.max ?? 1).toFixed(2)} · ${track.oscAddress || '/'}`;
+    }
+    if (track.kind === 'osc-array') {
+      const count = clamp(Math.round(Number(track.oscArray?.valueCount) || 5), 1, 20);
+      return `OSC Array ${count}ch · ${track.oscAddress || '/'}`;
+    }
+    if (track.kind === 'osc-3d') {
+      const bounds = normalizeOsc3dBounds(track);
+      return `3D OSC X[${bounds.xMin.toFixed(2)}, ${bounds.xMax.toFixed(2)}] · Y[${bounds.yMin.toFixed(2)}, ${bounds.yMax.toFixed(2)}] · Z[${bounds.zMin.toFixed(2)}, ${bounds.zMax.toFixed(2)}]`;
+    }
+    if (track.kind === 'osc-flag') {
+      return `OSC Flag · ${(Array.isArray(track.nodes) ? track.nodes.length : 0)} flags · ${track.oscAddress || '/'}`;
+    }
+    if (track.kind === 'osc-color') {
+      return `OSC Color ${(track.oscColor?.fixtureType === 'rgbw' ? 'RGBW' : 'RGB')} · ${track.oscAddress || '/'}`;
+    }
+    if (track.kind === 'midi') {
+      const channel = Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1)));
+      const cc = Math.max(0, Math.min(127, Math.round(Number(track.midi?.controlNumber) || 1)));
+      return `MIDI CC Ch ${channel} · CC ${cc}`;
+    }
+    if (track.kind === 'midi-note') {
+      const channel = Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1)));
+      return `MIDI Note Ch ${channel}`;
+    }
+    if (track.kind === 'dmx') {
+      const universe = Math.max(0, Math.min(32767, Math.round(Number(track.dmx?.universe) || 0)));
+      const channel = Math.max(1, Math.min(512, Math.round(Number(track.dmx?.channel) || 1)));
+      return `DMX U${universe} Ch${channel}`;
+    }
+    if (track.kind === 'dmx-color') {
+      const universe = Math.max(0, Math.min(32767, Math.round(Number(track.dmxColor?.universe) || 0)));
+      const channelStart = Math.max(1, Math.min(512, Math.round(Number(track.dmxColor?.channelStart) || 1)));
+      return `DMX Color U${universe} Ch${channelStart}`;
+    }
+    return '';
+  };
+
   const handleTrackColorChange = (trackId, color) => {
     const safe = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#5dd8c7';
     const targets =
@@ -4356,9 +5658,9 @@ export default function App() {
 
   const handleNameEnterNext = () => {
     if (!selectedTrackId) return;
-    const index = project.tracks.findIndex((track) => track.id === selectedTrackId);
+    const index = visibleTracks.findIndex((track) => track.id === selectedTrackId);
     if (index < 0) return;
-    const nextTrack = project.tracks[index + 1];
+    const nextTrack = visibleTracks[index + 1];
     if (!nextTrack) return;
     dispatch({ type: 'select-track', id: nextTrack.id });
     setNameFocusToken((prev) => prev + 1);
@@ -4366,7 +5668,7 @@ export default function App() {
 
   const handleAddNode = (trackId, node) => {
     const track = project.tracks.find((item) => item.id === trackId);
-    if (track?.kind === 'audio') return;
+    if (track?.kind === 'audio' || track?.kind === 'group') return;
     if (track?.kind === 'midi-note') {
       const safeNode = {
         ...node,
@@ -4379,6 +5681,36 @@ export default function App() {
         type: 'add-node',
         id: trackId,
         node: safeNode,
+      });
+      return;
+    }
+    if (track?.kind === 'midi') {
+      const safeTime = clamp(Number(node?.t) || playhead, 0, project.view.length);
+      const sampled = sampleTrackValue(track, safeTime);
+      dispatch({
+        type: 'add-node',
+        id: trackId,
+        node: {
+          ...node,
+          t: safeTime,
+          v: toMidiCcValue(node?.v, sampled),
+          curve: 'linear',
+        },
+      });
+      return;
+    }
+    if (track?.kind === 'dmx' || track?.kind === 'dmx-color') {
+      const safeTime = clamp(Number(node?.t) || playhead, 0, project.view.length);
+      const sampled = sampleTrackValue(track, safeTime);
+      dispatch({
+        type: 'add-node',
+        id: trackId,
+        node: {
+          ...node,
+          t: safeTime,
+          v: toDmxValue(node?.v, sampled),
+          curve: 'linear',
+        },
       });
       return;
     }
@@ -4401,7 +5733,7 @@ export default function App() {
     }
     if (track?.kind === 'osc-array') {
       const safeTime = clamp(Number(node?.t) || playhead, 0, project.view.length);
-      const sampledValues = sampleOscArrayTrackValues(track, safeTime);
+      const sampledValues = sampleOscArrayTrackValues(track, safeTime, project.timebase?.fps);
       const raw = Array.isArray(node?.arr) ? node.arr : sampledValues;
       const min = Number.isFinite(track.min) ? track.min : 0;
       const max = Number.isFinite(track.max) ? track.max : 1;
@@ -4421,6 +5753,26 @@ export default function App() {
       });
       return;
     }
+    if (track?.kind === 'osc-3d') {
+      const safeTime = clamp(Number(node?.t) || playhead, 0, project.view.length);
+      const sampledValues = sampleOsc3dTrackValues(track, safeTime, project.timebase?.fps);
+      const raw = Array.isArray(node?.arr) ? node.arr : sampledValues;
+      const bounds = normalizeOsc3dBounds(track);
+      const x = clamp(Number(raw[0] ?? sampledValues[0]) || 0, bounds.xMin, bounds.xMax);
+      const y = clamp(Number(raw[1] ?? sampledValues[1]) || 0, bounds.yMin, bounds.yMax);
+      const z = clamp(Number(raw[2] ?? sampledValues[2]) || 0, bounds.zMin, bounds.zMax);
+      dispatch({
+        type: 'add-node',
+        id: trackId,
+        node: {
+          ...node,
+          t: safeTime,
+          v: y,
+          arr: [x, y, z],
+        },
+      });
+      return;
+    }
     dispatch({
       type: 'add-node',
       id: trackId,
@@ -4431,7 +5783,83 @@ export default function App() {
   const handleNodeDrag = (trackId, nodeId, patch) => {
     const track = project.tracks.find((item) => item.id === trackId);
     if (track?.kind === 'audio') return;
-    dispatch({ type: 'update-node', id: trackId, nodeId, patch });
+    const nextPatch = { ...patch };
+    if (track?.kind === 'midi' && Object.prototype.hasOwnProperty.call(nextPatch, 'v')) {
+      nextPatch.v = toMidiCcValue(nextPatch.v, track.default);
+    }
+    if ((track?.kind === 'dmx' || track?.kind === 'dmx-color')
+      && Object.prototype.hasOwnProperty.call(nextPatch, 'v')) {
+      nextPatch.v = toDmxValue(nextPatch.v, track.default);
+    }
+    if (!track) return;
+
+    const sourceNode = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+    const hasTimePatch = Object.prototype.hasOwnProperty.call(nextPatch, 't')
+      && Number.isFinite(Number(nextPatch.t))
+      && Number.isFinite(Number(sourceNode?.t));
+    const selectedByTrack = selectedNodeIdsByTrackRef.current;
+    const sourceSelection = Array.isArray(selectedByTrack.get(trackId))
+      ? selectedByTrack.get(trackId)
+      : [];
+    const shouldCrossTrackShift = hasTimePatch && sourceSelection.includes(nodeId);
+
+    if (!shouldCrossTrackShift) {
+      dispatch({ type: 'update-node', id: trackId, nodeId, patch: nextPatch });
+      return;
+    }
+
+    const deltaT = Number(nextPatch.t) - Number(sourceNode.t);
+    if (!Number.isFinite(deltaT) || Math.abs(deltaT) < 1e-9) {
+      dispatch({ type: 'update-node', id: trackId, nodeId, patch: nextPatch });
+      return;
+    }
+
+    const patchesByTrack = new Map();
+    const pushPatch = (targetTrackId, targetNodeId, targetPatch) => {
+      if (!patchesByTrack.has(targetTrackId)) patchesByTrack.set(targetTrackId, new Map());
+      patchesByTrack.get(targetTrackId).set(targetNodeId, targetPatch);
+    };
+
+    pushPatch(trackId, nodeId, nextPatch);
+
+    selectedByTrack.forEach((ids, targetTrackId) => {
+      if (!Array.isArray(ids) || !ids.length) return;
+      const targetTrack = project.tracks.find((item) => item.id === targetTrackId);
+      if (!targetTrack || targetTrack.kind === 'audio') return;
+      ids.forEach((selectedId) => {
+        if (targetTrackId === trackId && selectedId === nodeId) return;
+        const targetNode = Array.isArray(targetTrack.nodes)
+          ? targetTrack.nodes.find((item) => item.id === selectedId)
+          : null;
+        if (!targetNode) return;
+        pushPatch(targetTrackId, selectedId, {
+          t: clamp((Number(targetNode.t) || 0) + deltaT, 0, project.view.length),
+        });
+      });
+    });
+
+    if (patchesByTrack.size === 1 && patchesByTrack.get(trackId)?.size === 1) {
+      dispatch({ type: 'update-node', id: trackId, nodeId, patch: nextPatch });
+      return;
+    }
+
+    const nextTracks = project.tracks.map((item) => {
+      const trackPatches = patchesByTrack.get(item.id);
+      if (!trackPatches?.size) return item;
+      const nextNodes = (Array.isArray(item.nodes) ? item.nodes : []).map((node) => {
+        const patchForNode = trackPatches.get(node.id);
+        if (!patchForNode) return node;
+        return { ...node, ...patchForNode };
+      });
+      return { ...item, nodes: nextNodes };
+    });
+
+    dispatch({
+      type: 'update-project',
+      patch: {
+        tracks: nextTracks,
+      },
+    });
   };
 
   const handlePatchSingleNode = (trackId, nodeId, patch) => {
@@ -4447,22 +5875,129 @@ export default function App() {
     if (Object.prototype.hasOwnProperty.call(nextPatch, 'y')) {
       nextPatch.y = Number.isFinite(Number(nextPatch.y)) ? clamp(Number(nextPatch.y), 0, 1) : 0.5;
     }
+    if (track.kind === 'midi' && Object.prototype.hasOwnProperty.call(nextPatch, 'v')) {
+      nextPatch.v = toMidiCcValue(nextPatch.v, track.default);
+    }
+    if ((track.kind === 'dmx' || track.kind === 'dmx-color')
+      && Object.prototype.hasOwnProperty.call(nextPatch, 'v')) {
+      nextPatch.v = toDmxValue(nextPatch.v, track.default);
+    }
     if (track.kind === 'osc-flag' && Object.prototype.hasOwnProperty.call(nextPatch, 'a')) {
       nextPatch.a = normalizeOscAddressPath(nextPatch.a, normalizeOscAddressPath(track.oscAddress, '/osc/flag'));
+    }
+    if (track.kind === 'osc-flag' && Object.prototype.hasOwnProperty.call(nextPatch, 'v')) {
+      nextPatch.v = formatOscOutputScalar(nextPatch.v, getOscSendValueType(track));
     }
     dispatch({ type: 'update-node', id: trackId, nodeId, patch: nextPatch });
   };
 
   const handleNodeSelectionChange = useCallback((trackId, nodeIds) => {
     const nextIds = Array.isArray(nodeIds) ? nodeIds : [];
-    setSelectedNodeContext((prev) => {
-      const sameTrack = prev.trackId === trackId;
-      const sameLength = prev.nodeIds.length === nextIds.length;
-      const sameNodes = sameLength && prev.nodeIds.every((id, index) => id === nextIds[index]);
-      if (sameTrack && sameNodes) return prev;
-      return { trackId, nodeIds: nextIds };
+    const map = selectedNodeIdsByTrackRef.current;
+    if (!trackId) return;
+    if (nextIds.length) {
+      map.set(trackId, nextIds);
+    } else {
+      map.delete(trackId);
+    }
+    syncSelectedNodeSnapshot(trackId);
+  }, [syncSelectedNodeSnapshot]);
+
+  const handleTrackLanesMarqueeStart = useCallback((event) => {
+    if (event.button !== 0) return;
+    const target = event.target;
+    if (target?.closest?.('[data-selectable-node="1"]')) return;
+    if (target?.closest?.('.audio-lane__clip-hit')) return;
+
+    const panel = trackLanesPanelRef.current;
+    if (!panel) return;
+    const panelRect = panel.getBoundingClientRect();
+    if (!panelRect.width || !panelRect.height) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    trackEditMarqueeRef.current = {
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      moved: false,
+    };
+
+    const toLocal = (clientX, clientY) => ({
+      x: clamp(clientX - panelRect.left, 0, panelRect.width),
+      y: clamp(clientY - panelRect.top, 0, panelRect.height),
     });
-  }, []);
+
+    const startLocal = toLocal(event.clientX, event.clientY);
+    setTrackEditMarquee({
+      x1: startLocal.x,
+      y1: startLocal.y,
+      x2: startLocal.x,
+      y2: startLocal.y,
+    });
+
+    const applySelection = (clientX, clientY) => {
+      const marquee = trackEditMarqueeRef.current;
+      if (!marquee) return;
+      const left = Math.min(marquee.startClientX, clientX);
+      const right = Math.max(marquee.startClientX, clientX);
+      const top = Math.min(marquee.startClientY, clientY);
+      const bottom = Math.max(marquee.startClientY, clientY);
+      const nodeElements = panel.querySelectorAll('[data-selectable-node="1"][data-track-id][data-node-id]');
+      const nextMap = new Map();
+
+      nodeElements.forEach((element) => {
+        const trackId = element.getAttribute('data-track-id');
+        const nodeId = element.getAttribute('data-node-id');
+        if (!trackId || !nodeId) return;
+        const rect = element.getBoundingClientRect();
+        const cx = (rect.left + rect.right) * 0.5;
+        const cy = (rect.top + rect.bottom) * 0.5;
+        if (cx < left || cx > right || cy < top || cy > bottom) return;
+        if (!nextMap.has(trackId)) nextMap.set(trackId, []);
+        const ids = nextMap.get(trackId);
+        if (!ids.includes(nodeId)) ids.push(nodeId);
+      });
+
+      selectedNodeIdsByTrackRef.current = nextMap;
+      syncSelectedNodeSnapshot();
+    };
+
+    const onPointerMove = (moveEvent) => {
+      const marquee = trackEditMarqueeRef.current;
+      if (!marquee) return;
+      const dx = Math.abs(moveEvent.clientX - marquee.startClientX);
+      const dy = Math.abs(moveEvent.clientY - marquee.startClientY);
+      if (!marquee.moved && (dx > 2 || dy > 2)) {
+        marquee.moved = true;
+      }
+      const local = toLocal(moveEvent.clientX, moveEvent.clientY);
+      setTrackEditMarquee({
+        x1: startLocal.x,
+        y1: startLocal.y,
+        x2: local.x,
+        y2: local.y,
+      });
+      applySelection(moveEvent.clientX, moveEvent.clientY);
+    };
+
+    const onPointerEnd = () => {
+      const marquee = trackEditMarqueeRef.current;
+      trackEditMarqueeRef.current = null;
+      setTrackEditMarquee(null);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+      if (!marquee?.moved) {
+        selectedNodeIdsByTrackRef.current = new Map();
+        syncSelectedNodeSnapshot();
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerEnd);
+    window.addEventListener('pointercancel', onPointerEnd);
+  }, [syncSelectedNodeSnapshot]);
 
   const handleEditNode = (trackId, nodeId, value, mode = 'value', colorHex = null) => {
     const track = project.tracks.find((item) => item.id === trackId);
@@ -4490,6 +6025,8 @@ export default function App() {
     if (track?.kind === 'osc-flag') {
       const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
       if (!node) return;
+      const valueType = getOscSendValueType(track);
+      const safeValue = formatOscOutputScalar(node.v, valueType);
       const parts = secondsToHmsfParts(
         clamp(Number(node.t) || 0, 0, project.view.length),
         syncFpsPreset.fps
@@ -4507,27 +6044,66 @@ export default function App() {
           node.a,
           normalizeOscAddressPath(track.oscAddress, '/osc/flag')
         ),
-        value: Number.isFinite(Number(node.v)) ? Number(node.v).toFixed(2) : '1.00',
+        valueType,
+        value: valueType === 'int'
+          ? String(Math.round(Number(safeValue) || 1))
+          : (Number.isFinite(Number(safeValue)) ? Number(safeValue).toFixed(2) : '1.00'),
       });
       return;
     }
     if (mode === 'osc-array' && track?.kind === 'osc-array') {
       const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
       if (!node) return;
+      const valueType = getOscSendValueType(track);
       const parts = secondsToHmsfParts(
         clamp(Number(node.t) || 0, 0, project.view.length),
         syncFpsPreset.fps
       );
-      const values = normalizeOscArrayNodeValues(track, node).map((item) => Number(item).toFixed(2));
+      const values = normalizeOscArrayNodeValues(track, node).map((item) => (
+        valueType === 'int'
+          ? String(Math.round(Number(item) || 0))
+          : Number(item).toFixed(2)
+      ));
       setEditingNode({
         trackId,
         nodeId,
         mode: 'osc-array',
+        valueType,
         arrayHours: String(parts.hours),
         arrayMinutes: String(parts.minutes),
         arraySeconds: String(parts.seconds),
         arrayFrames: String(parts.frames),
         arrayValues: values,
+      });
+      return;
+    }
+    if (mode === 'osc-3d' && track?.kind === 'osc-3d') {
+      const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+      if (!node) return;
+      const bounds = normalizeOsc3dBounds(track);
+      const values = normalizeOsc3dNodeValues(track, node);
+      const valueType = getOscSendValueType(track);
+      const parts = secondsToHmsfParts(
+        clamp(Number(node.t) || 0, 0, project.view.length),
+        syncFpsPreset.fps
+      );
+      const toText = (numeric) => (
+        valueType === 'int'
+          ? String(Math.round(Number(numeric) || 0))
+          : Number(numeric).toFixed(2)
+      );
+      setEditingNode({
+        trackId,
+        nodeId,
+        mode: 'osc-3d',
+        valueType,
+        osc3dHours: String(parts.hours),
+        osc3dMinutes: String(parts.minutes),
+        osc3dSeconds: String(parts.seconds),
+        osc3dFrames: String(parts.frames),
+        xValue: toText(values[0]),
+        yValue: toText(values[1]),
+        zValue: toText(values[2]),
       });
       return;
     }
@@ -4554,11 +6130,27 @@ export default function App() {
       });
       return;
     }
+    const node = Array.isArray(track?.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+    const parts = secondsToHmsfParts(
+      clamp(Number(node?.t) || 0, 0, project.view.length),
+      syncFpsPreset.fps
+    );
     setEditingNode({
       trackId,
       nodeId,
       mode: 'value',
-      value: Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00',
+      valueType: track?.kind === 'osc' ? getOscSendValueType(track) : null,
+      valueHours: String(parts.hours),
+      valueMinutes: String(parts.minutes),
+      valueSeconds: String(parts.seconds),
+      valueFrames: String(parts.frames),
+      value: track?.kind === 'midi'
+        ? String(toMidiCcValue(numeric, track.default ?? 0))
+        : track?.kind === 'dmx' || track?.kind === 'dmx-color'
+          ? String(toDmxValue(numeric, track.default ?? 0))
+        : track?.kind === 'osc' && getOscSendValueType(track) === 'int'
+          ? String(Math.round(Number.isFinite(numeric) ? numeric : (track?.default ?? 0)))
+        : (Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00'),
     });
   };
 
@@ -4924,9 +6516,17 @@ export default function App() {
         project.view.length
       );
       const triggerTime = Math.max(Number(editingNode.triggerTime) || 1, 0);
-      const value = Number(editingNode.value);
+      const valueType = editingNode.valueType === 'int' ? 'int' : 'float';
+      const value = formatOscOutputScalar(editingNode.value, valueType);
       const fallbackAddress = normalizeOscAddressPath(track?.oscAddress, '/osc/flag');
       const address = normalizeOscAddressPath(editingNode.address, fallbackAddress);
+      dispatch({
+        type: 'update-track',
+        id: editingNode.trackId,
+        patch: {
+          oscValueType: valueType,
+        },
+      });
       dispatch({
         type: 'update-node',
         id: editingNode.trackId,
@@ -4934,7 +6534,7 @@ export default function App() {
         patch: {
           t: nodeTime,
           d: triggerTime,
-          v: Number.isFinite(value) ? Math.round(value * 100) / 100 : 1,
+          v: Number.isFinite(Number(value)) ? Number(value) : 1,
           a: address,
         },
       });
@@ -4961,9 +6561,14 @@ export default function App() {
       const min = Number.isFinite(track.min) ? track.min : 0;
       const max = Number.isFinite(track.max) ? track.max : 1;
       const count = getOscArrayValueCount(track);
+      const valueType = editingNode.valueType === 'int' ? 'int' : getOscSendValueType(track);
       const raw = Array.isArray(editingNode.arrayValues) ? editingNode.arrayValues : [];
       const nextValues = Array.from({ length: count }, (_, index) => (
-        clamp(Number(raw[index] ?? track.default ?? 0) || 0, min, max)
+        clamp(
+          Number(formatOscOutputScalar(raw[index] ?? track.default ?? 0, valueType)) || 0,
+          min,
+          max
+        )
       ));
       dispatch({
         type: 'update-node',
@@ -4973,6 +6578,59 @@ export default function App() {
           t: nodeTime,
           v: nextValues[0] ?? track.default ?? 0,
           arr: nextValues,
+        },
+      });
+      setEditingNode(null);
+      return;
+    }
+    if (editingNode.mode === 'osc-3d') {
+      const track = project.tracks.find((item) => item.id === editingNode.trackId);
+      if (!track || track.kind !== 'osc-3d') {
+        setEditingNode(null);
+        return;
+      }
+      const nodeTime = clamp(
+        hmsfPartsToSeconds(
+          Number(editingNode.osc3dHours) || 0,
+          Number(editingNode.osc3dMinutes) || 0,
+          Number(editingNode.osc3dSeconds) || 0,
+          Number(editingNode.osc3dFrames) || 0,
+          syncFpsPreset.fps
+        ),
+        0,
+        project.view.length
+      );
+      const valueType = editingNode.valueType === 'int' ? 'int' : 'float';
+      const bounds = normalizeOsc3dBounds(track);
+      const formatAxisValue = (raw, axisMin, axisMax, fallback) => {
+        const parsed = Number(raw);
+        const numeric = Number.isFinite(parsed) ? parsed : fallback;
+        const converted = valueType === 'int' ? Math.round(numeric) : Math.round(numeric * 100) / 100;
+        return clamp(converted, axisMin, axisMax);
+      };
+      const fallbackValues = normalizeOsc3dNodeValues(track, {
+        arr: [editingNode.xValue, editingNode.yValue, editingNode.zValue],
+        v: editingNode.yValue,
+      });
+      const x = formatAxisValue(editingNode.xValue, bounds.xMin, bounds.xMax, fallbackValues[0]);
+      const y = formatAxisValue(editingNode.yValue, bounds.yMin, bounds.yMax, fallbackValues[1]);
+      const z = formatAxisValue(editingNode.zValue, bounds.zMin, bounds.zMax, fallbackValues[2]);
+
+      dispatch({
+        type: 'update-track',
+        id: editingNode.trackId,
+        patch: {
+          oscValueType: valueType,
+        },
+      });
+      dispatch({
+        type: 'update-node',
+        id: editingNode.trackId,
+        nodeId: editingNode.nodeId,
+        patch: {
+          t: nodeTime,
+          arr: [x, y, z],
+          v: y,
         },
       });
       setEditingNode(null);
@@ -5007,14 +6665,32 @@ export default function App() {
       setEditingNode(null);
       return;
     }
+    const track = project.tracks.find((item) => item.id === editingNode.trackId);
     const value = Number(editingNode.value);
     if (Number.isFinite(value)) {
-      const rounded = Math.round(value * 100) / 100;
+      const nodeTime = clamp(
+        hmsfPartsToSeconds(
+          Number(editingNode.valueHours) || 0,
+          Number(editingNode.valueMinutes) || 0,
+          Number(editingNode.valueSeconds) || 0,
+          Number(editingNode.valueFrames) || 0,
+          syncFpsPreset.fps
+        ),
+        0,
+        project.view.length
+      );
+      const rounded = track?.kind === 'midi'
+        ? toMidiCcValue(value, track.default ?? 0)
+        : track?.kind === 'dmx' || track?.kind === 'dmx-color'
+          ? toDmxValue(value, track.default ?? 0)
+        : track?.kind === 'osc' && getOscSendValueType(track) === 'int'
+          ? Math.round(value)
+        : Math.round(value * 100) / 100;
       dispatch({
         type: 'update-node',
         id: editingNode.trackId,
         nodeId: editingNode.nodeId,
-        patch: { v: rounded },
+        patch: { t: nodeTime, v: rounded },
       });
     }
     setEditingNode(null);
@@ -5044,6 +6720,135 @@ export default function App() {
     );
     handleAudioClipMove(editingAudioClip.trackId, time);
     setEditingAudioClip(null);
+  };
+
+  const getOsc3dEditingState = (draft) => {
+    const bounds = editingNodeTrack?.kind === 'osc-3d'
+      ? normalizeOsc3dBounds(editingNodeTrack)
+      : normalizeOsc3dBounds({
+        bounds: {
+          xMin: draft?.xMin,
+          xMax: draft?.xMax,
+          yMin: draft?.yMin,
+          yMax: draft?.yMax,
+          zMin: draft?.zMin,
+          zMax: draft?.zMax,
+        },
+      });
+    const valueType = draft?.valueType === 'int' ? 'int' : 'float';
+    const parseValue = (raw, fallback) => {
+      const numeric = Number(raw);
+      const safe = Number.isFinite(numeric) ? numeric : fallback;
+      return valueType === 'int' ? Math.round(safe) : Math.round(safe * 100) / 100;
+    };
+    const xMid = (bounds.xMin + bounds.xMax) * 0.5;
+    const yMid = (bounds.yMin + bounds.yMax) * 0.5;
+    const zMid = (bounds.zMin + bounds.zMax) * 0.5;
+    const x = clamp(parseValue(draft?.xValue, xMid), bounds.xMin, bounds.xMax);
+    const y = clamp(parseValue(draft?.yValue, yMid), bounds.yMin, bounds.yMax);
+    const z = clamp(parseValue(draft?.zValue, zMid), bounds.zMin, bounds.zMax);
+    const ratio = (value, min, max) => {
+      const span = Math.max(max - min, 1e-9);
+      return clamp((value - min) / span, 0, 1);
+    };
+    return {
+      bounds,
+      valueType,
+      values: { x, y, z },
+      ratios: {
+        x: ratio(x, bounds.xMin, bounds.xMax),
+        y: ratio(y, bounds.yMin, bounds.yMax),
+        z: ratio(z, bounds.zMin, bounds.zMax),
+      },
+    };
+  };
+
+  const applyOsc3dPlaneFromPointer = (plane, clientX, clientY, rect) => {
+    const ratioX = clamp((clientX - rect.left) / Math.max(rect.width, 1), 0, 1);
+    const ratioY = clamp((clientY - rect.top) / Math.max(rect.height, 1), 0, 1);
+    setEditingNode((prev) => {
+      if (!prev || prev.mode !== 'osc-3d') return prev;
+      const osc3d = getOsc3dEditingState(prev);
+      const nextValues = { ...osc3d.values };
+      if (plane === 'xy') {
+        nextValues.x = osc3d.bounds.xMin + ratioX * (osc3d.bounds.xMax - osc3d.bounds.xMin);
+        nextValues.y = osc3d.bounds.yMax - ratioY * (osc3d.bounds.yMax - osc3d.bounds.yMin);
+      } else if (plane === 'yz') {
+        nextValues.y = osc3d.bounds.yMax - ratioY * (osc3d.bounds.yMax - osc3d.bounds.yMin);
+        nextValues.z = osc3d.bounds.zMin + ratioX * (osc3d.bounds.zMax - osc3d.bounds.zMin);
+      }
+      const formatValue = (numeric) => (
+        osc3d.valueType === 'int'
+          ? String(Math.round(numeric))
+          : (Math.round(numeric * 100) / 100).toFixed(2)
+      );
+      return {
+        ...prev,
+        xValue: formatValue(clamp(nextValues.x, osc3d.bounds.xMin, osc3d.bounds.xMax)),
+        yValue: formatValue(clamp(nextValues.y, osc3d.bounds.yMin, osc3d.bounds.yMax)),
+        zValue: formatValue(clamp(nextValues.z, osc3d.bounds.zMin, osc3d.bounds.zMax)),
+      };
+    });
+  };
+
+  const beginOsc3dPlaneDrag = (plane, event) => {
+    if (!editingNode || editingNode.mode !== 'osc-3d') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    const rect = target.getBoundingClientRect();
+    applyOsc3dPlaneFromPointer(plane, event.clientX, event.clientY, rect);
+    const onPointerMove = (moveEvent) => {
+      applyOsc3dPlaneFromPointer(plane, moveEvent.clientX, moveEvent.clientY, rect);
+    };
+    const onPointerEnd = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerEnd);
+    window.addEventListener('pointercancel', onPointerEnd);
+  };
+
+  const beginOsc3dCameraDrag = (event) => {
+    if (!editingNode || editingNode.mode !== 'osc-3d') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startCamera = { ...osc3dCamera };
+    osc3dCameraDragRef.current = { startX, startY, startCamera };
+    const onPointerMove = (moveEvent) => {
+      const drag = osc3dCameraDragRef.current;
+      if (!drag) return;
+      const deltaX = moveEvent.clientX - drag.startX;
+      const deltaY = moveEvent.clientY - drag.startY;
+      setOsc3dCamera({
+        yaw: drag.startCamera.yaw + deltaX * 0.35,
+        pitch: clamp(drag.startCamera.pitch - deltaY * 0.35, -85, 85),
+        zoom: drag.startCamera.zoom,
+      });
+    };
+    const onPointerEnd = () => {
+      osc3dCameraDragRef.current = null;
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerEnd);
+    window.addEventListener('pointercancel', onPointerEnd);
+  };
+
+  const handleOsc3dCameraWheel = (event) => {
+    if (!editingNode || editingNode.mode !== 'osc-3d') return;
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    setOsc3dCamera((prev) => ({
+      ...prev,
+      zoom: clamp((Number(prev.zoom) || 1) + direction * 0.08, 0.55, 2.4),
+    }));
   };
 
   const handleSave = () => {
@@ -5312,6 +7117,7 @@ export default function App() {
     || oscPortConflict.controlPort;
   const canUndo = (historyPast?.length ?? 0) > 0;
   const canRedo = (historyFuture?.length ?? 0) > 0;
+  const cueList = Array.isArray(project.cues) ? project.cues : EMPTY_LIST;
   const multiAddCount = Math.floor(Number(multiAddDialog?.count));
   const canConfirmMultiAdd = Number.isFinite(multiAddCount) && multiAddCount > 0;
   useEffect(() => {
@@ -5474,9 +7280,11 @@ export default function App() {
     const safeKind = kind === 'audio'
       || kind === 'midi'
       || kind === 'midi-note'
+      || kind === 'group'
       || kind === 'dmx'
       || kind === 'dmx-color'
       || kind === 'osc-array'
+      || kind === 'osc-3d'
       || kind === 'osc-color'
       || kind === 'osc-flag'
       ? kind
@@ -5514,9 +7322,11 @@ export default function App() {
       multiAddDialog.kind === 'audio'
       || multiAddDialog.kind === 'midi'
       || multiAddDialog.kind === 'midi-note'
+      || multiAddDialog.kind === 'group'
       || multiAddDialog.kind === 'dmx'
       || multiAddDialog.kind === 'dmx-color'
       || multiAddDialog.kind === 'osc-array'
+      || multiAddDialog.kind === 'osc-3d'
       || multiAddDialog.kind === 'osc-color'
       || multiAddDialog.kind === 'osc-flag'
         ? multiAddDialog.kind
@@ -5538,6 +7348,15 @@ export default function App() {
             channel: clamp(startChannel + index, 1, 512),
           },
         },
+      }));
+      dispatch({ type: 'add-tracks', items });
+      setMultiAddDialog(null);
+      return;
+    }
+
+    if (safeKind === 'group') {
+      const items = Array.from({ length: count }, () => ({
+        kind: 'group',
       }));
       dispatch({ type: 'add-tracks', items });
       setMultiAddDialog(null);
@@ -5718,13 +7537,16 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + M</kbd><span>Add MIDI Note track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + D</kbd><span>Add DMX track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + D</kbd><span>Add DMX Color track</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + S</kbd><span>Save project</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + L</kbd><span>Load project</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + C</kbd><span>Copy selected track(s), or selected node(s)</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + X</kbd><span>Cut selected node(s)</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + V</kbd><span>Paste track(s), or paste node(s) at playhead</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Z</kbd><span>Undo</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + Z</kbd><span>Redo</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Y</kbd><span>Redo (alternative)</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + = / -</kbd><span>Zoom timeline in / out</span></div>
-                <div className="help-shortcuts__row"><kbd>Shift + Alt/Option + Wheel</kbd><span>Zoom T</span></div>
+                <div className="help-shortcuts__row"><kbd>Shift + Alt/Option + Wheel</kbd><span>Zoom W</span></div>
                 <div className="help-shortcuts__row"><kbd>Shift + Ctrl + Wheel</kbd><span>Zoom H</span></div>
                 <div className="help-shortcuts__row"><kbd>Enter (Audio Channel Map)</kbd><span>Save map and jump to next Audio track</span></div>
                 <div className="help-shortcuts__row"><kbd>↓ (Audio Channel Map)</kbd><span>Save map and jump to next Audio track</span></div>
@@ -5758,13 +7580,13 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Color Swatch</kbd><span>Apply color to selected track group</span></div>
                 <div className="help-shortcuts__row"><kbd>Shift + Click Track</kbd><span>Select track range (anchor to clicked track)</span></div>
                 <div className="help-shortcuts__row"><kbd>Ctrl/Cmd + Click Track</kbd><span>Toggle individual track selection</span></div>
-              </div>
-
-              <div className="help-shortcuts__section">
-                <div className="help-shortcuts__title">Project / Audio Notes</div>
-                <div className="help-shortcuts__row"><kbd>New Project</kbd><span>Default project length is 01:00:00.00</span></div>
-                <div className="help-shortcuts__row"><kbd>Import Audio Clip</kbd><span>Does not auto-change project length</span></div>
-                <div className="help-shortcuts__row"><kbd>Audio Clip Display</kbd><span>Clip head stays aligned with timeline at all zoom levels</span></div>
+                <div className="help-shortcuts__row"><kbd>Inspector: Open 3D Monitor</kbd><span>Open one independent 3D monitor window per 3D OSC track</span></div>
+                <div className="help-shortcuts__row"><kbd>Drag 3D Space (Edit 3D OSC Node)</kbd><span>Orbit camera (XYZ RGB axis rotates with view)</span></div>
+                <div className="help-shortcuts__row"><kbd>Wheel 3D Space (Edit 3D OSC Node)</kbd><span>Zoom 3D camera</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click 3D Space (Edit 3D OSC Node)</kbd><span>Reset 3D camera</span></div>
+                <div className="help-shortcuts__row"><kbd>Drag 3D OSC Monitor</kbd><span>Orbit monitor camera</span></div>
+                <div className="help-shortcuts__row"><kbd>Wheel 3D OSC Monitor</kbd><span>Zoom monitor camera</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click 3D OSC Monitor</kbd><span>Reset monitor camera</span></div>
               </div>
 
               <div className="help-shortcuts__section">
@@ -6259,10 +8081,14 @@ export default function App() {
                   ? 'Add Multi Audio'
                     : multiAddDialog.kind === 'midi'
                       ? 'Add Multi MIDI CC'
+                    : multiAddDialog.kind === 'group'
+                      ? 'Add Multi Group'
                     : multiAddDialog.kind === 'midi-note'
                       ? 'Add Multi MIDI Note'
                     : multiAddDialog.kind === 'osc-array'
                       ? (multiAddDialog.singleAdd ? 'Add OSC Array' : 'Add Multi OSC Array')
+                    : multiAddDialog.kind === 'osc-3d'
+                      ? 'Add Multi 3D OSC'
                     : multiAddDialog.kind === 'osc-color'
                       ? 'Add Multi OSC Color'
                     : multiAddDialog.kind === 'osc-flag'
@@ -6630,7 +8456,9 @@ export default function App() {
                     ? 'Edit OSC Flag Node'
                     : (editingNode.mode === 'osc-array'
                       ? 'Edit OSC Array Node'
-                      : (editingNode.mode === 'midi-note' ? 'Edit MIDI Note Node' : 'Edit Node Value')))}
+                      : (editingNode.mode === 'osc-3d'
+                        ? 'Edit 3D OSC Node'
+                        : (editingNode.mode === 'midi-note' ? 'Edit MIDI Note Node' : 'Edit Node Value'))))}
               </div>
               <button className="btn btn--ghost" onClick={() => setEditingNode(null)}>Close</button>
             </div>
@@ -6750,13 +8578,19 @@ export default function App() {
                           <label>{`Index ${index + 1}`}</label>
                           <NumberInput
                             className="input"
-                            step="0.01"
+                            step={editingNode.valueType === 'int' ? '1' : '0.01'}
                             value={item}
                             onChange={(event) => {
                               setEditingNode((prev) => {
                                 if (!prev) return prev;
                                 const nextValues = Array.isArray(prev.arrayValues) ? [...prev.arrayValues] : [];
-                                nextValues[index] = event.target.value;
+                                const raw = event.target.value;
+                                if (prev.valueType === 'int') {
+                                  const numeric = Number(raw);
+                                  nextValues[index] = Number.isFinite(numeric) ? String(Math.round(numeric)) : raw;
+                                } else {
+                                  nextValues[index] = raw;
+                                }
                                 return { ...prev, arrayValues: nextValues };
                               });
                             }}
@@ -6766,6 +8600,214 @@ export default function App() {
                     </div>
                   </div>
                 </>
+              ) : editingNode.mode === 'osc-3d' ? (
+                (() => {
+                  const osc3d = getOsc3dEditingState(editingNode);
+                  const bounds = osc3d.bounds;
+                  const preview = createOsc3dPreviewGeometry(osc3d.ratios, osc3dCamera);
+                  return (
+                    <>
+                      <div className="field">
+                        <label>Node Time (hh:mm:ss.ff)</label>
+                        <div className="field-grid field-grid--quad">
+                          <NumberInput
+                            className="input"
+                            min="0"
+                            step="1"
+                            placeholder="hh"
+                            value={editingNode.osc3dHours}
+                            onChange={(event) =>
+                              setEditingNode((prev) => (prev ? { ...prev, osc3dHours: event.target.value } : prev))}
+                          />
+                          <NumberInput
+                            className="input"
+                            min="0"
+                            step="1"
+                            placeholder="mm"
+                            value={editingNode.osc3dMinutes}
+                            onChange={(event) =>
+                              setEditingNode((prev) => (prev ? { ...prev, osc3dMinutes: event.target.value } : prev))}
+                          />
+                          <NumberInput
+                            className="input"
+                            min="0"
+                            max="59"
+                            step="1"
+                            placeholder="ss"
+                            value={editingNode.osc3dSeconds}
+                            onChange={(event) =>
+                              setEditingNode((prev) => (prev ? { ...prev, osc3dSeconds: event.target.value } : prev))}
+                          />
+                          <NumberInput
+                            className="input"
+                            min="0"
+                            max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                            step="1"
+                            placeholder="ff"
+                            value={editingNode.osc3dFrames}
+                            onChange={(event) =>
+                              setEditingNode((prev) => (prev ? { ...prev, osc3dFrames: event.target.value } : prev))}
+                          />
+                        </div>
+                      </div>
+                      <div className="field">
+                        <label>Value Type</label>
+                        <select
+                          className="input"
+                          value={editingNode.valueType === 'int' ? 'int' : 'float'}
+                          onChange={(event) =>
+                            setEditingNode((prev) => {
+                              if (!prev) return prev;
+                              const nextType = event.target.value === 'int' ? 'int' : 'float';
+                              if (nextType === prev.valueType) return prev;
+                              const toText = (raw) => {
+                                const numeric = Number(raw);
+                                if (!Number.isFinite(numeric)) return raw;
+                                return nextType === 'int'
+                                  ? String(Math.round(numeric))
+                                  : (Math.round(numeric * 100) / 100).toFixed(2);
+                              };
+                              return {
+                                ...prev,
+                                valueType: nextType,
+                                xValue: toText(prev.xValue),
+                                yValue: toText(prev.yValue),
+                                zValue: toText(prev.zValue),
+                              };
+                            })}
+                        >
+                          <option value="float">Float (0.00)</option>
+                          <option value="int">Integer</option>
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label>XYZ</label>
+                        <div className="field-grid field-grid--triple">
+                          <div className="field">
+                            <label>X</label>
+                            <NumberInput
+                              className="input"
+                              step={editingNode.valueType === 'int' ? '1' : '0.01'}
+                              value={editingNode.xValue}
+                              onChange={(event) =>
+                                setEditingNode((prev) => (prev ? { ...prev, xValue: event.target.value } : prev))}
+                            />
+                          </div>
+                          <div className="field">
+                            <label>Y</label>
+                            <NumberInput
+                              className="input"
+                              step={editingNode.valueType === 'int' ? '1' : '0.01'}
+                              value={editingNode.yValue}
+                              onChange={(event) =>
+                                setEditingNode((prev) => (prev ? { ...prev, yValue: event.target.value } : prev))}
+                            />
+                          </div>
+                          <div className="field">
+                            <label>Z</label>
+                            <NumberInput
+                              className="input"
+                              step={editingNode.valueType === 'int' ? '1' : '0.01'}
+                              value={editingNode.zValue}
+                              onChange={(event) =>
+                                setEditingNode((prev) => (prev ? { ...prev, zValue: event.target.value } : prev))}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="osc3d-editor-grid">
+                        <div className="osc3d-plane">
+                          <div className="osc3d-plane__title">XY</div>
+                          <div
+                            className="osc3d-plane__surface"
+                            onPointerDown={(event) => beginOsc3dPlaneDrag('xy', event)}
+                          >
+                            <div className="osc3d-plane__axis osc3d-plane__axis--horizontal">X</div>
+                            <div className="osc3d-plane__axis osc3d-plane__axis--vertical">Y</div>
+                            <div
+                              className="osc3d-plane__point"
+                              style={{
+                                left: `${osc3d.ratios.x * 100}%`,
+                                top: `${(1 - osc3d.ratios.y) * 100}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="osc3d-plane">
+                          <div className="osc3d-plane__title">YZ</div>
+                          <div
+                            className="osc3d-plane__surface"
+                            onPointerDown={(event) => beginOsc3dPlaneDrag('yz', event)}
+                          >
+                            <div className="osc3d-plane__axis osc3d-plane__axis--horizontal">Z</div>
+                            <div className="osc3d-plane__axis osc3d-plane__axis--vertical">Y</div>
+                            <div
+                              className="osc3d-plane__point"
+                              style={{
+                                left: `${osc3d.ratios.z * 100}%`,
+                                top: `${(1 - osc3d.ratios.y) * 100}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="osc3d-preview osc3d-preview--large">
+                          <div className="osc3d-preview__title">3D Space (Drag to Orbit · Wheel to Zoom)</div>
+                          <div
+                            className="osc3d-preview__stage osc3d-preview__stage--large"
+                            onPointerDown={beginOsc3dCameraDrag}
+                            onWheel={handleOsc3dCameraWheel}
+                            onDoubleClick={() => setOsc3dCamera({ ...OSC3D_CAMERA_DEFAULT })}
+                          >
+                            <svg className="osc3d-preview__svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
+                              {preview.axes.map((axis) => (
+                                <g key={`axis-${axis.id}`}>
+                                  <line
+                                    x1={axis.from.x}
+                                    y1={axis.from.y}
+                                    x2={axis.tip.x}
+                                    y2={axis.tip.y}
+                                    className="osc3d-preview__axis-line"
+                                    stroke={axis.color}
+                                    style={{ opacity: clamp(axis.depth, 0.3, 1) }}
+                                  />
+                                  <text
+                                    x={axis.labelPos.x}
+                                    y={axis.labelPos.y}
+                                    className="osc3d-preview__axis-label"
+                                    fill={axis.color}
+                                    style={{ opacity: clamp(axis.depth, 0.45, 1) }}
+                                  >
+                                    {axis.label}
+                                  </text>
+                                </g>
+                              ))}
+                              {preview.edges.map((edge) => (
+                                <line
+                                  key={edge.id}
+                                  x1={edge.from.x}
+                                  y1={edge.from.y}
+                                  x2={edge.to.x}
+                                  y2={edge.to.y}
+                                  className="osc3d-preview__line"
+                                  style={{ opacity: clamp(edge.depth, 0.25, 1) }}
+                                />
+                              ))}
+                              <circle
+                                cx={preview.point.x}
+                                cy={preview.point.y}
+                                r={1.7 + preview.point.depth * 2.2}
+                                className="osc3d-preview__point-mark"
+                              />
+                            </svg>
+                          </div>
+                          <div className="field__hint">
+                            {`X ${bounds.xMin.toFixed(2)}~${bounds.xMax.toFixed(2)} · Y ${bounds.yMin.toFixed(2)}~${bounds.yMax.toFixed(2)} · Z ${bounds.zMin.toFixed(2)}~${bounds.zMax.toFixed(2)} · Zoom ${osc3dCamera.zoom.toFixed(2)}x`}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()
               ) : editingNode.mode === 'osc-flag' ? (
                 <>
                   <div className="field">
@@ -6824,11 +8866,43 @@ export default function App() {
                     <label>Trigger Value</label>
                     <NumberInput
                       className="input"
-                      step="0.01"
+                      step={editingNode.valueType === 'int' ? '1' : '0.01'}
                       value={editingNode.value}
                       onChange={(event) =>
-                        setEditingNode((prev) => (prev ? { ...prev, value: event.target.value } : prev))}
+                        setEditingNode((prev) => {
+                          if (!prev) return prev;
+                          const raw = event.target.value;
+                          if (prev.valueType === 'int') {
+                            const numeric = Number(raw);
+                            if (Number.isFinite(numeric)) {
+                              return { ...prev, value: String(Math.round(numeric)) };
+                            }
+                          }
+                          return { ...prev, value: raw };
+                        })}
                     />
+                  </div>
+                  <div className="field">
+                    <label>Value Type</label>
+                    <select
+                      className="input"
+                      value={editingNode.valueType === 'int' ? 'int' : 'float'}
+                      onChange={(event) =>
+                        setEditingNode((prev) => (
+                          prev
+                            ? {
+                              ...prev,
+                              valueType: event.target.value === 'int' ? 'int' : 'float',
+                              value: event.target.value === 'int' && Number.isFinite(Number(prev.value))
+                                ? String(Math.round(Number(prev.value)))
+                                : prev.value,
+                            }
+                            : prev
+                        ))}
+                    >
+                      <option value="int">Integer</option>
+                      <option value="float">Float (0.00)</option>
+                    </select>
                   </div>
                   <div className="field">
                     <label>Trigger Time (sec)</label>
@@ -6912,15 +8986,84 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                <div className="field">
-                  <label>Value</label>
-                  <NumberInput
-                    className="input"
-                    step="0.01"
-                    value={editingNode.value}
-                    onChange={(event) => setEditingNode({ ...editingNode, value: event.target.value })}
-                  />
-                </div>
+                <>
+                  <div className="field">
+                    <label>Node Time (hh:mm:ss.ff)</label>
+                    <div className="field-grid field-grid--quad">
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="hh"
+                        value={editingNode.valueHours}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, valueHours: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="mm"
+                        value={editingNode.valueMinutes}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, valueMinutes: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max="59"
+                        step="1"
+                        placeholder="ss"
+                        value={editingNode.valueSeconds}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, valueSeconds: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                        step="1"
+                        placeholder="ff"
+                        value={editingNode.valueFrames}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, valueFrames: event.target.value } : prev))}
+                      />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>Value</label>
+                    <NumberInput
+                      className="input"
+                      step={
+                        editingNodeTrack?.kind === 'midi'
+                        || editingNodeTrack?.kind === 'dmx'
+                        || editingNodeTrack?.kind === 'dmx-color'
+                        || (editingNodeTrack?.kind === 'osc' && editingNode.valueType === 'int')
+                          ? '1'
+                          : '0.01'
+                      }
+                      value={editingNode.value}
+                      onChange={(event) =>
+                        setEditingNode((prev) => {
+                          if (!prev) return prev;
+                          const raw = event.target.value;
+                          if (editingNodeTrack?.kind === 'midi') {
+                            const numeric = Number(raw);
+                            return { ...prev, value: Number.isFinite(numeric) ? String(Math.round(numeric)) : raw };
+                          }
+                          if (editingNodeTrack?.kind === 'dmx' || editingNodeTrack?.kind === 'dmx-color') {
+                            const numeric = Number(raw);
+                            return { ...prev, value: Number.isFinite(numeric) ? String(Math.round(numeric)) : raw };
+                          }
+                          if (editingNodeTrack?.kind === 'osc' && prev.valueType === 'int') {
+                            const numeric = Number(raw);
+                            return { ...prev, value: Number.isFinite(numeric) ? String(Math.round(numeric)) : raw };
+                          }
+                          return { ...prev, value: raw };
+                        })}
+                    />
+                  </div>
+                </>
               )}
               <div className="modal__actions">
                 <button className="btn btn--ghost" onClick={() => setEditingNode(null)}>Cancel</button>
@@ -7390,159 +9533,206 @@ export default function App() {
               <div className="track-header-row track-header-row--actions">
                 <div className="label">Tracks</div>
                 <div className="tracks-actions">
-                  <div className="tracks-add-wrap">
-                    <button
-                      className="btn btn--tiny btn--symbol"
-                      title="Add track (hold Alt/Option for Multi Add menu)"
-                      aria-label="Add track. Hold Alt or Option for multi add menu."
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        const mode = event.altKey ? 'multi' : 'single';
-                        if (isAddTrackMenuOpen && addTrackMenuMode === mode) {
-                          setIsAddTrackMenuOpen(false);
-                          return;
-                        }
-                        setAddTrackMenuMode(mode);
-                        setIsAddTrackMenuOpen(true);
-                      }}
-                      onPointerDown={(event) => event.stopPropagation()}
-                    >
-                      +
-                    </button>
-                    {isAddTrackMenuOpen && (
-                      <div
-                        className="tracks-add-menu"
+                  <div className="tracks-actions__group">
+                    <div className="tracks-add-wrap">
+                      <button
+                        className="btn btn--tiny btn--symbol"
+                        title="Add track (hold Alt/Option for Multi Add menu)"
+                        aria-label="Add track. Hold Alt or Option for multi add menu."
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          const mode = event.altKey ? 'multi' : 'single';
+                          if (isAddTrackMenuOpen && addTrackMenuMode === mode) {
+                            setIsAddTrackMenuOpen(false);
+                            return;
+                          }
+                          setAddTrackMenuMode(mode);
+                          setIsAddTrackMenuOpen(true);
+                        }}
                         onPointerDown={(event) => event.stopPropagation()}
                       >
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('osc');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'osc' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
+                        +
+                      </button>
+                      {isAddTrackMenuOpen && (
+                        <div
+                          className="tracks-add-menu"
+                          onPointerDown={(event) => event.stopPropagation()}
                         >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC' : 'Add OSC'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('osc-flag');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'osc-flag' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC Flag' : 'Add OSC Flag'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('osc-array');
-                              return;
-                            }
-                            openMultiAddDialog('osc-array', {
-                              count: '1',
-                              singleAdd: true,
-                            });
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC Array' : 'Add OSC Array'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('osc-color');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'osc-color' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC Color' : 'Add OSC Color'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('audio');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'audio' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi Audio' : 'Add Audio'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('midi');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'midi' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi MIDI CC' : 'Add MIDI CC'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('midi-note');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'midi-note' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi MIDI Note' : 'Add MIDI Note'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('dmx');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'dmx' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi DMX' : 'Add DMX'}
-                        </button>
-                        <button
-                          className="tracks-add-menu__item"
-                          onClick={() => {
-                            if (addTrackMenuMode === 'multi') {
-                              openMultiAddDialog('dmx-color');
-                              return;
-                            }
-                            dispatch({ type: 'add-track', kind: 'dmx-color' });
-                            setIsAddTrackMenuOpen(false);
-                          }}
-                        >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi DMX Color' : 'Add DMX Color'}
-                        </button>
-                      </div>
-                    )}
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('osc');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'osc' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi OSC' : 'Add OSC'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('osc-flag');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'osc-flag' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi OSC Flag' : 'Add OSC Flag'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('osc-array');
+                                return;
+                              }
+                              openMultiAddDialog('osc-array', {
+                                count: '1',
+                                singleAdd: true,
+                              });
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi OSC Array' : 'Add OSC Array'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('osc-3d');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'osc-3d' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi 3D OSC' : 'Add 3D OSC'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('osc-color');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'osc-color' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi OSC Color' : 'Add OSC Color'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('audio');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'audio' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi Audio' : 'Add Audio'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('midi');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'midi' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi MIDI CC' : 'Add MIDI CC'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('midi-note');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'midi-note' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi MIDI Note' : 'Add MIDI Note'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('dmx');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'dmx' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi DMX' : 'Add DMX'}
+                          </button>
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('dmx-color');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'dmx-color' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi DMX Color' : 'Add DMX Color'}
+                          </button>
+                          <div className="tracks-add-menu__separator" />
+                          <button
+                            className="tracks-add-menu__item"
+                            onClick={() => {
+                              if (addTrackMenuMode === 'multi') {
+                                openMultiAddDialog('group');
+                                return;
+                              }
+                              dispatch({ type: 'add-track', kind: 'group' });
+                              setIsAddTrackMenuOpen(false);
+                            }}
+                          >
+                            {addTrackMenuMode === 'multi' ? 'Add Multi Group' : 'Add Group'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      className="btn btn--ghost btn--tiny btn--symbol"
+                      onClick={handleDeleteTrack}
+                      disabled={!selectedTrackId}
+                    >
+                      -
+                    </button>
                   </div>
-                  <button
-                    className="btn btn--ghost btn--tiny btn--symbol"
-                    onClick={handleDeleteTrack}
-                    disabled={!selectedTrackId}
-                  >
-                    -
-                  </button>
+                  <div className="tracks-actions__group">
+                    <button
+                      className="btn btn--ghost btn--tiny btn--symbol tracks-clear-btn"
+                      onClick={clearAllTrackSolo}
+                      disabled={!hasAnyTrackSolo}
+                      title="Clear all solo"
+                    >
+                      S
+                    </button>
+                    <button
+                      className="btn btn--ghost btn--tiny btn--symbol tracks-clear-btn"
+                      onClick={clearAllTrackMute}
+                      disabled={!hasAnyTrackMute}
+                      title="Clear all mute"
+                    >
+                      M
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -7555,7 +9745,7 @@ export default function App() {
               width={timelineWidth}
               onSeek={handleSeek}
               onScroll={handleScroll}
-              cues={project.cues || []}
+              cues={cueList}
               onCueEdit={handleEditCue}
               onCueAdd={handleCueAdd}
               onCueMove={handleCueMove}
@@ -7572,13 +9762,33 @@ export default function App() {
             <div className="tracks-scroll__grid">
               <div className="track-list track-list--body">
                 <div className="track-list__body track-list__body--static">
-                  {project.tracks.map((track, index) => {
+                  {visibleTracks.map((track, index) => {
                     const meterLevel = getTrackMeterLevel(track);
                     const meterLevelClass = getMeterLevelClass(meterLevel);
+                    const groupHostId = groupHostByTrackId.get(track.id);
+                    const isGroupedChild = Boolean(groupHostId && track.kind !== 'group');
+                    const rowHeight = getRenderedTrackHeight(track);
+                    const groupedChildCompact = isGroupedChild && rowHeight <= 66;
+                    const effectiveTrackInfoDensity = isGroupedChild
+                      ? (
+                        groupedChildCompact
+                          ? 'compact'
+                          : (
+                            trackInfoDensity === 'full' && rowHeight >= 88
+                              ? 'full'
+                              : 'medium'
+                          )
+                      )
+                      : trackInfoDensity;
+                    const parentGroupName = isGroupedChild
+                      ? (groupTrackById.get(groupHostId)?.name || 'Group')
+                      : '';
+                    const groupedChildSummary = isGroupedChild ? getGroupedChildSummary(track) : '';
+                    const renderDetailedMeta = !isGroupedChild || effectiveTrackInfoDensity === 'full';
                     return (
                     <div
                       key={track.id}
-                      className={`track-row track-row--${trackInfoDensity} ${selectedTrackId === track.id ? 'is-selected' : ''} ${selectedTrackIds.includes(track.id) ? 'is-group-selected' : ''} ${dragTrackIds.includes(track.id) ? 'is-dragging' : ''} ${dropTarget?.id === track.id ? `is-drop-${dropTarget.position}` : ''}`}
+                      className={`track-row track-row--${effectiveTrackInfoDensity} ${isGroupedChild ? 'track-row--group-child' : ''} ${selectedTrackId === track.id ? 'is-selected' : ''} ${selectedTrackIds.includes(track.id) ? 'is-group-selected' : ''} ${dragTrackIds.includes(track.id) ? 'is-dragging' : ''} ${dropTarget?.id === track.id ? `is-drop-${dropTarget.position}` : ''}`}
                       onClick={(event) => handleTrackRowSelect(track.id, event)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
@@ -7586,14 +9796,17 @@ export default function App() {
                           handleTrackRowSelect(track.id, event);
                         }
                       }}
-                      draggable
+                      draggable={editingTrackNameId !== track.id}
                       onDragStart={(event) => {
-                        const groupIds =
+                        if (editingTrackNameId === track.id) {
+                          event.preventDefault();
+                          return;
+                        }
+                        const selectedIdsInOrder =
                           selectedTrackIds.includes(track.id) && selectedTrackIds.length > 1
-                            ? project.tracks
-                              .map((item) => item.id)
-                              .filter((id) => selectedTrackIds.includes(id))
+                            ? visibleTrackIdsInOrder.filter((id) => selectedTrackIds.includes(id))
                             : [track.id];
+                        const groupIds = expandTrackIdsWithGroupMembers(selectedIdsInOrder);
                         setDragTrackId(track.id);
                         setDragTrackIds(groupIds);
                         setDropTarget(null);
@@ -7606,10 +9819,19 @@ export default function App() {
                         if (dragTrackIds.includes(track.id)) return;
                         event.preventDefault();
                         const rect = event.currentTarget.getBoundingClientRect();
-                        const position =
-                          dragTrackIds.length > 1
-                            ? 'after'
-                            : (event.clientY < rect.top + rect.height / 2 ? 'before' : 'after');
+                        const ratio = (event.clientY - rect.top) / Math.max(rect.height, 1);
+                        const sourceIds = dragTrackIds.length ? dragTrackIds : [dragTrackId];
+                        const draggingContainsGroup = sourceIds.some((id) => {
+                          const sourceTrack = project.tracks.find((item) => item.id === id);
+                          return sourceTrack?.kind === 'group';
+                        });
+                        const canDropInside = track.kind === 'group' && !draggingContainsGroup;
+                        let position = 'after';
+                        if (canDropInside && ratio >= 0.18 && ratio <= 0.82) {
+                          position = 'inside';
+                        } else if (dragTrackIds.length <= 1) {
+                          position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                        }
                         setDropTarget({ id: track.id, position });
                       }}
                       onDrop={(event) => {
@@ -7636,13 +9858,25 @@ export default function App() {
                         }
                         if (sourceIds.length) {
                           const rect = event.currentTarget.getBoundingClientRect();
+                          const ratio = (event.clientY - rect.top) / Math.max(rect.height, 1);
+                          const draggingContainsGroup = sourceIds.some((id) => {
+                            const sourceTrack = project.tracks.find((item) => item.id === id);
+                            return sourceTrack?.kind === 'group';
+                          });
+                          const canDropInside = track.kind === 'group' && !draggingContainsGroup;
                           const fallbackPosition =
-                            event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
-                          const position =
-                            sourceIds.length > 1
-                              ? 'after'
-                              : (dropTarget?.id === track.id ? dropTarget.position : fallbackPosition);
-                          if (sourceIds.length > 1) {
+                            canDropInside && ratio >= 0.18 && ratio <= 0.82
+                              ? 'inside'
+                              : (event.clientY < rect.top + rect.height / 2 ? 'before' : 'after');
+                          let position = dropTarget?.id === track.id ? dropTarget.position : fallbackPosition;
+                          if (sourceIds.length > 1 && track.kind !== 'group' && position !== 'inside') {
+                            position = 'after';
+                          }
+                          if (position === 'inside' && track.kind === 'group') {
+                            handleMoveTracksIntoGroup(sourceIds, track.id);
+                          } else if (track.kind === 'group' && (position === 'before' || position === 'after')) {
+                            handleMoveTracksAtGroupBoundary(sourceIds, track.id, position);
+                          } else if (sourceIds.length > 1) {
                             handleMoveTrackGroup(sourceIds, track.id, 'after');
                           } else {
                             handleMoveTrack(sourceIds[0], track.id, position);
@@ -7660,7 +9894,7 @@ export default function App() {
                       role="button"
                       tabIndex={0}
                       style={{
-                        height: project.view.trackHeight,
+                        height: rowHeight,
                         '--track-accent': typeof track.color === 'string' ? track.color : '#5dd8c7',
                       }}
                     >
@@ -7680,13 +9914,66 @@ export default function App() {
                             }}
                           />
                         </label>
-                        <span className="track-row__index">{String(index + 1).padStart(2, '0')}</span>
-                        <span className="track-row__name">{track.name}</span>
+                        {isGroupedChild && <span className="track-row__child-marker">↳</span>}
+                        {!isGroupedChild && (
+                          <span className="track-row__index">{String(index + 1).padStart(2, '0')}</span>
+                        )}
+                        {editingTrackNameId === track.id ? (
+                          <input
+                            className="input track-row__name-input"
+                            value={editingTrackName}
+                            autoFocus
+                            onChange={(event) => setEditingTrackName(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                commitTrackInlineRename(track.id);
+                                return;
+                              }
+                              if (event.key === 'Escape') {
+                                event.preventDefault();
+                                cancelTrackInlineRename();
+                              }
+                            }}
+                            onBlur={() => commitTrackInlineRename(track.id)}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        ) : (
+                          <button
+                            className="track-row__name-btn"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              beginTrackInlineRename(track);
+                            }}
+                            title="Click to rename"
+                          >
+                            <span className="track-row__name">{track.name}</span>
+                          </button>
+                        )}
                       </div>
-                      {trackInfoDensity !== 'compact' && (
+                      {effectiveTrackInfoDensity !== 'compact' && (
                         <div className="track-row__meta">
-                          {track.kind === 'audio' && (
-                            trackInfoDensity === 'full' ? (
+                          {isGroupedChild && <span>{`In ${parentGroupName}`}</span>}
+                          {isGroupedChild && groupedChildSummary && (
+                            <span className="track-row__group-summary">{groupedChildSummary}</span>
+                          )}
+                          {renderDetailedMeta && track.kind === 'group' && (
+                            effectiveTrackInfoDensity === 'full' ? (
+                              <>
+                                <span>Group Track</span>
+                                <span>{track.group?.expanded !== false ? 'Expanded' : 'Collapsed'}</span>
+                                <span>{(groupMembersById.get(track.id) || []).length} tracks</span>
+                              </>
+                            ) : (
+                              <>
+                                <span>Group Track</span>
+                                <span>{(groupMembersById.get(track.id) || []).length} tracks</span>
+                              </>
+                            )
+                          )}
+                          {renderDetailedMeta && track.kind === 'audio' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>Audio Track</span>
                                 <span className="track-row__osc">{track.audio?.name || 'No audio loaded'}</span>
@@ -7699,8 +9986,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'osc' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'osc' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>OSC Track</span>
                                 <span>{track.min} to {track.max}</span>
@@ -7717,8 +10004,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'osc-array' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'osc-array' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>OSC Array Track</span>
                                 <span>{`Values ${clamp(Math.round(Number(track.oscArray?.valueCount) || 5), 1, 20)} | ${Number(track.min ?? 0).toFixed(2)} to ${Number(track.max ?? 1).toFixed(2)}`}</span>
@@ -7735,8 +10022,32 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'osc-flag' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'osc-3d' && (
+                            (() => {
+                              const bounds = normalizeOsc3dBounds(track);
+                              const outputLabel = oscOutputLabelMap.get(track.oscOutputId) || oscOutputLabelMap.get(defaultOscOutput.id);
+                              return effectiveTrackInfoDensity === 'full' ? (
+                                <>
+                                  <span>3D OSC Track</span>
+                                  <span>
+                                    {`X ${bounds.xMin.toFixed(2)}~${bounds.xMax.toFixed(2)} · Y ${bounds.yMin.toFixed(2)}~${bounds.yMax.toFixed(2)} · Z ${bounds.zMin.toFixed(2)}~${bounds.zMax.toFixed(2)}`}
+                                  </span>
+                                  <span className="track-row__osc">
+                                    {track.oscAddress}
+                                    {' · '}
+                                    {outputLabel}
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <span>3D OSC Track</span>
+                                  <span>{`XYZ ${track.oscValueType === 'int' ? 'int' : 'float'}`}</span>
+                                </>
+                              );
+                            })()
+                          )}
+                          {renderDetailedMeta && track.kind === 'osc-flag' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>OSC Flag Track</span>
                                 <span className="track-row__osc">
@@ -7751,8 +10062,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'osc-color' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'osc-color' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>OSC Color Track</span>
                                 <span>
@@ -7777,8 +10088,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'midi' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'midi' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>MIDI CC Track</span>
                                 <span>
@@ -7799,8 +10110,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'midi-note' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'midi-note' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>MIDI Note Track</span>
                                 <span>
@@ -7819,8 +10130,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'dmx' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'dmx' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>DMX Track</span>
                                 <span>
@@ -7845,8 +10156,8 @@ export default function App() {
                               </>
                             )
                           )}
-                          {track.kind === 'dmx-color' && (
-                            trackInfoDensity === 'full' ? (
+                          {renderDetailedMeta && track.kind === 'dmx-color' && (
+                            effectiveTrackInfoDensity === 'full' ? (
                               <>
                                 <span>DMX Color Track</span>
                                 <span>
@@ -7886,89 +10197,133 @@ export default function App() {
                         </div>
                       )}
                       <div className="track-row__controls">
-                        <button
-                          className={`track-pill ${track.solo ? 'is-active' : ''}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleTrackSolo(track.id);
-                          }}
-                          title={
-                            track.kind === 'audio'
-                              ? 'Solo audio track'
-                              : track.kind === 'midi'
-                                ? 'Solo MIDI CC track output'
-                                : track.kind === 'midi-note'
-                                  ? 'Solo MIDI Note track output'
-                                : track.kind === 'dmx'
-                                  ? 'Solo DMX track output'
-                                : track.kind === 'dmx-color'
-                                  ? 'Solo DMX Color track output'
-                                : track.kind === 'osc-color'
-                                  ? 'Solo OSC Color track output'
-                                : track.kind === 'osc-array'
-                                  ? 'Solo OSC Array track output'
-                                : track.kind === 'osc-flag'
-                                  ? 'Solo OSC Flag track output'
-                                : 'Solo OSC track output'
-                          }
-                        >
-                          S
-                        </button>
-                        <button
-                          className={`track-pill track-pill--mute ${track.mute ? 'is-active' : ''}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleTrackMute(track.id);
-                          }}
-                          title={
-                            track.kind === 'audio'
-                              ? 'Mute audio track'
-                              : track.kind === 'midi'
-                                ? 'Mute MIDI CC track output'
-                                : track.kind === 'midi-note'
-                                  ? 'Mute MIDI Note track output'
-                                : track.kind === 'dmx'
-                                  ? 'Mute DMX track output'
-                                : track.kind === 'dmx-color'
-                                  ? 'Mute DMX Color track output'
-                                : track.kind === 'osc-color'
-                                  ? 'Mute OSC Color track output'
-                                : track.kind === 'osc-array'
-                                  ? 'Mute OSC Array track output'
-                                : track.kind === 'osc-flag'
-                                  ? 'Mute OSC Flag track output'
-                                : 'Mute OSC track output'
-                          }
-                        >
-                          M
-                        </button>
+                        {track.kind === 'group' ? (
+                          <button
+                            className={`track-pill track-pill--group ${track.group?.expanded !== false ? 'is-active' : ''}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleGroupExpanded(track.id);
+                            }}
+                            title={track.group?.expanded !== false ? 'Collapse group' : 'Expand group'}
+                          >
+                            {track.group?.expanded !== false ? '▾' : '▸'}
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              className={`track-pill ${track.solo ? 'is-active' : ''}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleTrackSolo(track.id);
+                              }}
+                              title={
+                                track.kind === 'audio'
+                                  ? 'Solo audio track'
+                                  : track.kind === 'midi'
+                                    ? 'Solo MIDI CC track output'
+                                    : track.kind === 'midi-note'
+                                      ? 'Solo MIDI Note track output'
+                                    : track.kind === 'dmx'
+                                      ? 'Solo DMX track output'
+                                    : track.kind === 'dmx-color'
+                                      ? 'Solo DMX Color track output'
+                                    : track.kind === 'osc-color'
+                                      ? 'Solo OSC Color track output'
+                                    : track.kind === 'osc-array'
+                                      ? 'Solo OSC Array track output'
+                                    : track.kind === 'osc-3d'
+                                      ? 'Solo 3D OSC track output'
+                                    : track.kind === 'osc-flag'
+                                      ? 'Solo OSC Flag track output'
+                                    : 'Solo OSC track output'
+                              }
+                            >
+                              S
+                            </button>
+                            <button
+                              className={`track-pill track-pill--mute ${track.mute ? 'is-active' : ''}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleTrackMute(track.id);
+                              }}
+                              title={
+                                track.kind === 'audio'
+                                  ? 'Mute audio track'
+                                  : track.kind === 'midi'
+                                    ? 'Mute MIDI CC track output'
+                                    : track.kind === 'midi-note'
+                                      ? 'Mute MIDI Note track output'
+                                    : track.kind === 'dmx'
+                                      ? 'Mute DMX track output'
+                                    : track.kind === 'dmx-color'
+                                      ? 'Mute DMX Color track output'
+                                    : track.kind === 'osc-color'
+                                      ? 'Mute OSC Color track output'
+                                    : track.kind === 'osc-array'
+                                      ? 'Mute OSC Array track output'
+                                    : track.kind === 'osc-3d'
+                                      ? 'Mute 3D OSC track output'
+                                    : track.kind === 'osc-flag'
+                                      ? 'Mute OSC Flag track output'
+                                    : 'Mute OSC track output'
+                              }
+                            >
+                              M
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                     );
                   })}
                 </div>
               </div>
-              <div className="timeline__lanes timeline__lanes--panel">
-                {project.tracks.map((track) => (
-                  <TrackLane
-                    key={track.id}
-                    track={track}
-                    view={project.view}
-                    height={project.view.trackHeight}
-                    timelineWidth={timelineWidth}
-                    suspendRendering={isUiResizing}
-                    cues={project.cues || []}
-                    isSelected={track.id === selectedTrackId}
-                    onSelect={(id) => dispatch({ type: 'select-track', id })}
-                    onNodeDrag={handleNodeDrag}
-                    onAddNode={handleAddNode}
-                    onEditNode={handleEditNode}
-                    onSelectionChange={handleNodeSelectionChange}
-                    onMoveAudioClip={handleAudioClipMove}
-                    onEditAudioClipStart={handleEditAudioClipStart}
-                    audioWaveform={audioWaveforms[track.id]}
+              <div
+                ref={trackLanesPanelRef}
+                className="timeline__lanes timeline__lanes--panel"
+                onPointerDownCapture={handleTrackLanesMarqueeStart}
+              >
+                {visibleTracks.map((track) => {
+                  const isGroupedChild = Boolean(groupHostByTrackId.get(track.id) && track.kind !== 'group');
+                  return (
+                    <TrackLane
+                      key={track.id}
+                        track={track}
+                        groupMembers={track.kind === 'group' ? (groupMembersById.get(track.id) || EMPTY_LIST) : undefined}
+                        isGroupedChild={isGroupedChild}
+                        view={project.view}
+                        height={getRenderedTrackHeight(track)}
+                        timelineWidth={timelineWidth}
+                        curveFps={project.timebase?.fps}
+                        suspendRendering={isUiResizing}
+                        cues={cueList}
+                        isSelected={track.id === selectedTrackId}
+                        externalSelectedNodeIds={selectedNodeIdsByTrack[track.id] || EMPTY_LIST}
+                        onSelect={(id) => dispatch({ type: 'select-track', id })}
+                        onSelectTrack={(id) => dispatch({ type: 'select-track', id })}
+                        onNodeDrag={handleNodeDrag}
+                        onSetNodeCurve={handleSetNodeCurve}
+                        onAddNode={handleAddNode}
+                        onEditNode={handleEditNode}
+                        onDeleteNodes={handleDeleteNodes}
+                        onSelectionChange={handleNodeSelectionChange}
+                        onMoveAudioClip={handleAudioClipMove}
+                        onEditAudioClipStart={handleEditAudioClipStart}
+                        audioWaveform={audioWaveforms[track.id]}
+                    />
+                  );
+                })}
+                {trackEditMarquee && (
+                  <div
+                    className="timeline-track-marquee"
+                    style={{
+                      left: `${Math.min(trackEditMarquee.x1, trackEditMarquee.x2)}px`,
+                      top: `${Math.min(trackEditMarquee.y1, trackEditMarquee.y2)}px`,
+                      width: `${Math.max(Math.abs(trackEditMarquee.x2 - trackEditMarquee.x1), 1)}px`,
+                      height: `${Math.max(Math.abs(trackEditMarquee.y2 - trackEditMarquee.y1), 1)}px`,
+                    }}
                   />
-                ))}
+                )}
                 <div
                   className={`playhead-line ${isPlaying ? 'is-active' : ''}`}
                   style={{ left: `${playheadX}px` }}
@@ -7984,7 +10339,7 @@ export default function App() {
               </button>
             </div>
             <div className="zoom-footer__group">
-              <span className="timeline-controls__label">Zoom T</span>
+              <span className="timeline-controls__label">Zoom W</span>
               <div className="timeline-controls__buttons">
                 <button
                   className="btn btn--unit"
@@ -8020,12 +10375,18 @@ export default function App() {
             oscOutputOptions={oscOutputOptions}
             virtualMidiOutputId={VIRTUAL_MIDI_OUTPUT_ID}
             virtualMidiOutputName={VIRTUAL_MIDI_OUTPUT_NAME}
+            groupMemberCount={
+              selectedTrack?.kind === 'group'
+                ? (groupMembersById.get(selectedTrack.id) || []).length
+                : 0
+            }
             onPatch={handlePatchTrack}
             onPatchNode={(nodeId, patch) => {
               if (!selectedTrack || !nodeId) return;
               handlePatchSingleNode(selectedTrack.id, nodeId, patch);
             }}
             onOpenAudioChannelMap={openAudioChannelMapDialog}
+            onOpenOsc3dMonitor={openOsc3dMonitor}
             onNameEnterNext={handleNameEnterNext}
             onAudioFile={(file) => {
               if (!selectedTrack) return;
@@ -8033,14 +10394,20 @@ export default function App() {
             }}
             onAddNode={() => {
               if (!selectedTrack) return;
+              if (selectedTrack.kind === 'group') return;
               const t = clamp(playhead, 0, project.view.length);
               if (selectedTrack.kind === 'osc-flag') {
                 handleAddNode(selectedTrack.id, { t, v: 1, d: 1, y: 0.5, curve: 'linear' });
                 return;
               }
               if (selectedTrack.kind === 'osc-array') {
-                const arr = sampleOscArrayTrackValues(selectedTrack, t);
+                const arr = sampleOscArrayTrackValues(selectedTrack, t, project.timebase?.fps);
                 handleAddNode(selectedTrack.id, { t, v: arr[0] ?? selectedTrack.default ?? 0, arr, curve: 'linear' });
+                return;
+              }
+              if (selectedTrack.kind === 'osc-3d') {
+                const arr = sampleOsc3dTrackValues(selectedTrack, t, project.timebase?.fps);
+                handleAddNode(selectedTrack.id, { t, v: arr[1] ?? selectedTrack.default ?? 0, arr, curve: 'linear' });
                 return;
               }
               if (selectedTrack.kind === 'midi-note') {

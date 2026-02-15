@@ -216,6 +216,7 @@ export default function TransportBar({
         <button className="btn btn--ghost" onClick={onRedo} disabled={!canRedo}>Redo</button>
         <button className="btn btn--ghost" onClick={onSave}>Save</button>
         <button className="btn btn--ghost" onClick={onLoad}>Load</button>
+        <button className="btn btn--ghost" onClick={onOpenSettings}>Settings</button>
         <button
           className={`btn btn--ghost ${isCompositionsVisible ? 'is-active' : ''}`}
           onClick={onToggleCompositions}
@@ -230,7 +231,6 @@ export default function TransportBar({
         >
           Inspector
         </button>
-        <button className="btn btn--ghost" onClick={onOpenSettings}>Settings</button>
       </div>
     </header>
   );

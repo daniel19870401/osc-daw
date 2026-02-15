@@ -10,19 +10,26 @@ OSC/Audio/MIDI/DMX 時間軸控制軟體。
 
 ## 所有功能
 
-- 時間軸播放、MTC/LTC 同步、多曲目編排
-- OSC 傳送數值、OSC Array、OSC Flag、OSC Color
-- DMX Color、DMX single value
-- Audio 排列播放
-- MIDI CC、MIDI Note
+- 時間軸播放 / 暫停 / 定位 / Loop 範圍控制（含精準時間輸入）
+- Sync 模式：Internal、MTC、LTC
+- 多 Composition（可命名、切換、排序；各自記住播放軸位置）
+- 軌道類型：OSC、OSC Array、OSC Flag、OSC Color、3D OSC、Audio、MIDI CC、MIDI Note、DMX、DMX Color、Group
+- OSC 多輸出 Port（可命名），各 OSC 類軌道可選輸出 Port
+- Audio Clip 載入、波形顯示、拖移、對齊 Cue、Audio Channel Map Patch
+- MIDI CC / MIDI Note 發送（可選 Port / Channel）
+- DMX / DMX Color（Art-Net）發送
+- 3D OSC 節點編輯（XY/YZ + 3D 視角），以及每軌獨立 3D Monitor 視窗
+- Node / Cue / Track 可複製、剪下、貼上，支援 Undo / Redo
 
-## 目前封裝版本（v1.2.0）
+## 目前封裝版本（v1.2.2）
 
 位於 `release/`：
 
-- `OSConductor-1.2.0-win-x64.exe`（Windows Intel x64）
-- `OSConductor-1.2.0-win-arm64.exe`（Windows ARM64）
-- `OSConductor-1.2.0-arm64-mac.zip`（macOS Apple Silicon）
+- `OSConductor-1.2.2-win-x64.exe`（Windows Intel x64）
+- `OSConductor-1.2.2-win-arm64.exe`（Windows ARM64）
+- `OSConductor-1.2.2-arm64.dmg`（macOS Apple Silicon，安裝檔）
+- `OSConductor-1.2.2-arm64-mac.zip`（macOS Apple Silicon，壓縮版）
+- `release/mac-arm64/OSConductor.app`（macOS Apple Silicon，app bundle）
 
 ## 開發
 
@@ -56,7 +63,8 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --publish neve
 - `Backspace/Delete`：刪除選取 Node 或 Track
 - `Cmd/Ctrl + O`：新增 OSC Track
 - `Cmd/Ctrl + A`：新增 Audio Track
-- `Cmd/Ctrl + M`：新增 MIDI Track
+- `Cmd/Ctrl + M`：新增 MIDI CC Track
+- `Cmd/Ctrl + Shift + M`：新增 MIDI Note Track
 - `Cmd/Ctrl + D`：新增 DMX Track
 - `Cmd/Ctrl + Shift + D`：新增 DMX Color Track
 - `Cmd/Ctrl + C`：複製選取 Track 或 Node
@@ -87,15 +95,23 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --publish neve
 - 點擊色塊：套用 Track 顏色（可對多選軌道）
 - `Shift + 點 Track`：範圍選取
 - `Ctrl/Cmd + 點 Track`：間隔多選
-- `Shift + Alt/Option + 滾輪`：Zoom T
+- `Shift + Alt/Option + 滾輪`：Zoom W
 - `Shift + Ctrl + 滾輪`：Zoom H
 
 ### Project / Audio Notes
 
-- 新專案預設長度：`01:00:00.00`
-- 載入 Audio Clip 不會自動改變 Project Length
+- 新專案預設長度：`00:10:00.00`
+- 載入 Audio Clip 時，若音檔超過目前 Project Length，會自動延長到「音檔結尾 + 30 秒」
 - Audio Clip 在時間軸極小縮放時，Clip 開頭仍會與時間軸對齊
 - 新增 Track 類型：`OSC Flag`（播放軸經過節點時觸發對應 OSC Address/Value）
+
+### 3D OSC Controls
+
+- `Inspector > Open 3D Monitor`：每一條 3D OSC 軌道可開獨立監看視窗
+- `Edit 3D OSC Node`：拖曳 3D Space 旋轉視角、滾輪縮放、雙擊重置
+- `3D OSC Monitor`：拖曳旋轉視角、滾輪縮放、雙擊重置
+- `Edit 3D OSC Node` 與 `3D OSC Monitor` 都有 RGB XYZ 軸標示，並會跟視角同步旋轉
+- 兩個 3D 視窗都採等比例顯示，不因視窗比例拉伸變形
 
 ### OSC Remote Control
 

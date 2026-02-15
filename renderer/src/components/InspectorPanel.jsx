@@ -14,10 +14,12 @@ export default function InspectorPanel({
   onAddNode,
   onAudioFile,
   onOpenAudioChannelMap,
+  onOpenOsc3dMonitor,
   onNameEnterNext,
   nameFocusToken,
   midiOutputOptions = [],
   oscOutputOptions = [],
+  groupMemberCount = 0,
   virtualMidiOutputId = 'virtual-midi-out',
   virtualMidiOutputName = 'OSConductor MIDI OUT',
 }) {
@@ -93,7 +95,7 @@ export default function InspectorPanel({
               </div>
             </div>
           )}
-          {(track.kind === 'osc' || track.kind === 'osc-array') && (
+          {(track.kind === 'osc' || track.kind === 'osc-array' || track.kind === 'osc-flag' || track.kind === 'osc-3d') && (
             <div className="field">
               <label>Value Type</label>
               <select
@@ -109,7 +111,7 @@ export default function InspectorPanel({
               </select>
             </div>
           )}
-          {(track.kind === 'osc' || track.kind === 'osc-array' || track.kind === 'osc-color' || track.kind === 'osc-flag') && (
+          {(track.kind === 'osc' || track.kind === 'osc-array' || track.kind === 'osc-color' || track.kind === 'osc-flag' || track.kind === 'osc-3d') && (
             <div className="field">
               <label>OSC Output</label>
               <select
@@ -130,7 +132,29 @@ export default function InspectorPanel({
             </div>
           )}
         </div>
-        {track.kind === 'audio' ? (
+        {track.kind === 'group' ? (
+          <div className="inspector__section" key="group-inspector">
+            <div className="inspector__title">Group</div>
+            <div className="field">
+              <label>State</label>
+              <select
+                className="input"
+                value={track.group?.expanded !== false ? 'expanded' : 'collapsed'}
+                onChange={(event) =>
+                  onPatch({
+                    group: { expanded: event.target.value === 'expanded' },
+                  })}
+              >
+                <option value="expanded">Expanded</option>
+                <option value="collapsed">Collapsed</option>
+              </select>
+            </div>
+            <div className="inspector__row">
+              <span>Member Tracks</span>
+              <span className="inspector__value">{Math.max(0, Math.round(Number(groupMemberCount) || 0))}</span>
+            </div>
+          </div>
+        ) : track.kind === 'audio' ? (
           <div className="inspector__section" key="audio-inspector">
             <div className="inspector__title">Audio</div>
             <div className="field">
@@ -627,6 +651,112 @@ export default function InspectorPanel({
               <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
             </div>
           </div>
+        ) : track.kind === 'osc-3d' ? (
+          <div className="inspector__section" key="osc-3d-inspector">
+            <div className="inspector__title">3D OSC</div>
+            <div className="field">
+              <label>OSC Address</label>
+              <input
+                className="input input--mono"
+                value={track.oscAddress ?? ''}
+                onChange={(event) => onPatch({ oscAddress: event.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label>Space Bounds</label>
+              <div className="field-grid field-grid--dual">
+                <div className="field">
+                  <label>X Min</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(track.osc3d?.bounds?.xMin) ? track.osc3d.bounds.xMin : -1}
+                    onChange={(event) =>
+                      onPatch({
+                        osc3d: { bounds: { xMin: parseNumber(event.target.value, -1) } },
+                      })}
+                  />
+                </div>
+                <div className="field">
+                  <label>X Max</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(track.osc3d?.bounds?.xMax) ? track.osc3d.bounds.xMax : 1}
+                    onChange={(event) =>
+                      onPatch({
+                        osc3d: { bounds: { xMax: parseNumber(event.target.value, 1) } },
+                      })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Y Min</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(track.osc3d?.bounds?.yMin) ? track.osc3d.bounds.yMin : -1}
+                    onChange={(event) =>
+                      onPatch({
+                        osc3d: { bounds: { yMin: parseNumber(event.target.value, -1) } },
+                      })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Y Max</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(track.osc3d?.bounds?.yMax) ? track.osc3d.bounds.yMax : 1}
+                    onChange={(event) =>
+                      onPatch({
+                        osc3d: { bounds: { yMax: parseNumber(event.target.value, 1) } },
+                      })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Z Min</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(track.osc3d?.bounds?.zMin) ? track.osc3d.bounds.zMin : -1}
+                    onChange={(event) =>
+                      onPatch({
+                        osc3d: { bounds: { zMin: parseNumber(event.target.value, -1) } },
+                      })}
+                  />
+                </div>
+                <div className="field">
+                  <label>Z Max</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(track.osc3d?.bounds?.zMax) ? track.osc3d.bounds.zMax : 1}
+                    onChange={(event) =>
+                      onPatch({
+                        osc3d: { bounds: { zMax: parseNumber(event.target.value, 1) } },
+                      })}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="field__hint">
+              Node outputs send OSC array as /address x y z. Use right click Edit Node for 3D XY / YZ controls.
+            </div>
+            <div className="inspector__buttons">
+              <button
+                className="btn btn--ghost"
+                onClick={() => {
+                  if (onOpenOsc3dMonitor) onOpenOsc3dMonitor(track.id);
+                }}
+              >
+                Open 3D Monitor
+              </button>
+            </div>
+            <div className="inspector__row">
+              <span>Nodes</span>
+              <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
+            </div>
+          </div>
         ) : track.kind === 'osc-flag' ? (
           <div className="inspector__section" key="osc-flag-inspector">
             <div className="inspector__title">OSC Flag</div>
@@ -667,11 +797,15 @@ export default function InspectorPanel({
                   <label>Trigger Value</label>
                   <NumberInput
                     className="input"
-                    step="0.01"
+                    step={track.oscValueType === 'int' ? '1' : '0.01'}
                     value={Number.isFinite(selectedNode.v) ? selectedNode.v : 1}
                     onChange={(event) => {
                       if (!onPatchNode) return;
-                      onPatchNode(selectedNode.id, { v: parseNumber(event.target.value, 1) });
+                      const raw = parseNumber(event.target.value, 1);
+                      const nextValue = track.oscValueType === 'int'
+                        ? Math.round(raw)
+                        : Math.round(raw * 100) / 100;
+                      onPatchNode(selectedNode.id, { v: nextValue });
                     }}
                   />
                 </div>
@@ -701,7 +835,7 @@ export default function InspectorPanel({
             </div>
           </div>
         )}
-        {track.kind !== 'audio' && (
+        {track.kind !== 'audio' && track.kind !== 'group' && (
           <div className="inspector__section">
             <div className="inspector__title">Actions</div>
             <div className="inspector__buttons">

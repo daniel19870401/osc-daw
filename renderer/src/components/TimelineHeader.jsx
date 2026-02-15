@@ -227,11 +227,19 @@ export default function TimelineHeader({
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
+    const initialView = viewStateRef.current;
+    const pointerTime = mapClientXToTime(
+      event.clientX,
+      initialView.start,
+      initialView.end,
+      initialView.length
+    );
     loopDragRef.current = {
       edge,
       pointerId: event.pointerId,
       start: normalizedLoopStart,
       end: normalizedLoopEnd,
+      rangeOffset: pointerTime - normalizedLoopStart,
     };
     const onPointerMove = (moveEvent) => {
       const drag = loopDragRef.current;
@@ -267,8 +275,14 @@ export default function TimelineHeader({
       const time = mapClientXToTime(moveEvent.clientX, start, end, length);
       if (drag.edge === 'start') {
         drag.start = clamp(time, 0, drag.end - MIN_LOOP_SPAN);
-      } else {
+      } else if (drag.edge === 'end') {
         drag.end = clamp(time, drag.start + MIN_LOOP_SPAN, length);
+      } else if (drag.edge === 'range') {
+        const spanLocked = Math.max(drag.end - drag.start, MIN_LOOP_SPAN);
+        const maxStart = Math.max(length - spanLocked, 0);
+        const anchoredStart = clamp(time - drag.rangeOffset, 0, maxStart);
+        drag.start = anchoredStart;
+        drag.end = clamp(anchoredStart + spanLocked, 0, length);
       }
       onLoopRangeChange({ start: drag.start, end: drag.end });
     };
@@ -420,6 +434,7 @@ export default function TimelineHeader({
             left: `${loopLeftPercent}%`,
             width: `${loopWidthPercent}%`,
           }}
+          onPointerDown={(event) => beginLoopHandleDrag(event, 'range')}
         />
         <button
           type="button"

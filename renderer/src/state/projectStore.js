@@ -3,11 +3,11 @@ const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const AUDIO_BUFFER_SIZES = [128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 const HISTORY_LIMIT = 200;
 const AUDIO_TRACK_MAX_CHANNELS = 64;
-const DEFAULT_PROJECT_LENGTH_SECONDS = 3600;
+const DEFAULT_PROJECT_LENGTH_SECONDS = 600;
 const DEFAULT_VIEW_SPAN_SECONDS = 8;
 const MIN_LOOP_SPAN_SECONDS = 0.001;
 const DEFAULT_OSC_OUTPUT_ID = 'osc-out-main';
-const OSC_TRACK_KINDS = new Set(['osc', 'osc-array', 'osc-color', 'osc-flag']);
+const OSC_TRACK_KINDS = new Set(['osc', 'osc-array', 'osc-color', 'osc-flag', 'osc-3d']);
 const HISTORY_ACTIONS = new Set([
   'update-project',
   'add-composition',
@@ -116,6 +116,16 @@ const DEFAULT_OSC_COLOR_TRACK_SETTINGS = {
 const DEFAULT_OSC_ARRAY_TRACK_SETTINGS = {
   valueCount: 5,
 };
+const DEFAULT_OSC_3D_TRACK_SETTINGS = {
+  bounds: {
+    xMin: -1,
+    xMax: 1,
+    yMin: -1,
+    yMax: 1,
+    zMin: -1,
+    zMax: 1,
+  },
+};
 const TRACK_COLORS = [
   '#5dd8c7',
   '#ffb458',
@@ -218,6 +228,53 @@ const normalizeOscValueType = (value) => (
   value === 'int' ? 'int' : 'float'
 );
 
+const VALID_CURVE_MODES = new Set([
+  'none',
+  'linear',
+  'quad-in',
+  'quad-out',
+  'quad-in-out',
+  'cubic-in',
+  'cubic-out',
+  'cubic-in-out',
+  'quart-in',
+  'quart-out',
+  'quart-in-out',
+  'quint-in',
+  'quint-out',
+  'quint-in-out',
+  'sine-in',
+  'sine-out',
+  'sine-in-out',
+  'circ-in',
+  'circ-out',
+  'circ-in-out',
+  'expo-in',
+  'expo-out',
+  'expo-in-out',
+  'elastic-in',
+  'elastic-out',
+  'elastic-in-out',
+  'back-in',
+  'back-out',
+  'back-in-out',
+  'bounce-in',
+  'bounce-out',
+  'bounce-in-out',
+  'smooth',
+]);
+
+const normalizeCurveMode = (value) => {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!raw) return 'linear';
+  if (VALID_CURVE_MODES.has(raw)) return raw;
+  if (raw === 'step' || raw === 'no-interpolation' || raw === 'nointerpolation') return 'none';
+  if (raw === 'ease-in') return 'cubic-in';
+  if (raw === 'ease-out') return 'cubic-out';
+  if (raw === 'ease-in-out') return 'cubic-in-out';
+  return 'linear';
+};
+
 const isOscTrackKind = (kind) => OSC_TRACK_KINDS.has(kind);
 
 const normalizeDmxFixtureType = (value) => (
@@ -245,6 +302,46 @@ const normalizeOscArrayValues = (value, count, fallback, min, max) => {
   ));
 };
 
+const normalizeOsc3dAxisBounds = (rawMin, rawMax, fallbackMin, fallbackMax) => {
+  const min = toFinite(rawMin, fallbackMin);
+  const max = toFinite(rawMax, fallbackMax);
+  if (min <= max) return { min, max };
+  return { min: max, max: min };
+};
+
+const normalizeOsc3dSettings = (value) => {
+  const source = value || {};
+  const bounds = source.bounds || {};
+  const xBounds = normalizeOsc3dAxisBounds(
+    bounds.xMin,
+    bounds.xMax,
+    DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.xMin,
+    DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.xMax
+  );
+  const yBounds = normalizeOsc3dAxisBounds(
+    bounds.yMin,
+    bounds.yMax,
+    DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.yMin,
+    DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.yMax
+  );
+  const zBounds = normalizeOsc3dAxisBounds(
+    bounds.zMin,
+    bounds.zMax,
+    DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.zMin,
+    DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.zMax
+  );
+  return {
+    bounds: {
+      xMin: xBounds.min,
+      xMax: xBounds.max,
+      yMin: yBounds.min,
+      yMax: yBounds.max,
+      zMin: zBounds.min,
+      zMax: zBounds.max,
+    },
+  };
+};
+
 const normalizeMappingChannels = (value) => {
   const channels = Math.round(toFinite(value, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mappingChannels));
   return channels === 3 ? 3 : 4;
@@ -264,6 +361,14 @@ const normalizeAudioChannelMap = (value, channels) => {
   });
 };
 
+const normalizeMidiCcValue = (value, fallback = 0) => (
+  clamp(Math.round(toFinite(value, fallback)), 0, 127)
+);
+
+const normalizeDmxValue = (value, fallback = 0) => (
+  clamp(Math.round(toFinite(value, fallback)), 0, 255)
+);
+
 const buildAutoTrackName = (address, index) => {
   const parts = address.split('/').filter(Boolean);
   const tail = parts[parts.length - 1];
@@ -279,6 +384,7 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     ...track,
     name: typeof track.name === 'string' ? track.name : '',
     oscAddress: typeof track.oscAddress === 'string' ? track.oscAddress : '',
+    groupId: typeof track.groupId === 'string' ? track.groupId : null,
     color: normalizeTrackColor(track.color, fallbackColor),
     mute: Boolean(track.mute),
     solo: Boolean(track.solo),
@@ -290,6 +396,18 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     next.kind = 'midi-note';
   }
   if (!next.id) next.id = `track-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+
+  if (next.kind === 'group') {
+    next.groupId = '';
+    next.group = {
+      expanded: track?.group?.expanded !== false,
+    };
+    next.min = 0;
+    next.max = 1;
+    next.default = 0;
+    next.oscAddress = '';
+  }
+
   next.oscOutputId = isOscTrackKind(next.kind)
     ? (
       typeof track.oscOutputId === 'string' && track.oscOutputId.trim()
@@ -330,6 +448,7 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
       };
       next.min = 0;
       next.max = 127;
+      next.default = normalizeMidiCcValue(next.default, 0);
     }
   }
 
@@ -402,7 +521,7 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/color');
   }
 
-  if (next.kind === 'osc' || next.kind === 'osc-array') {
+  if (next.kind === 'osc' || next.kind === 'osc-array' || next.kind === 'osc-flag' || next.kind === 'osc-3d') {
     next.oscValueType = normalizeOscValueType(next.oscValueType);
   } else {
     next.oscValueType = '';
@@ -416,16 +535,39 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/array');
   }
 
+  if (next.kind === 'osc-3d') {
+    next.osc3d = normalizeOsc3dSettings(track.osc3d);
+    next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/3d');
+    next.min = next.osc3d.bounds.yMin;
+    next.max = next.osc3d.bounds.yMax;
+  }
+
   if (next.kind === 'osc-flag') {
     next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/flag');
   }
 
-  if (next.kind !== 'osc' && next.kind !== 'osc-flag' && next.kind !== 'osc-color' && next.kind !== 'osc-array') {
+  if (
+    next.kind !== 'osc'
+    && next.kind !== 'osc-flag'
+    && next.kind !== 'osc-color'
+    && next.kind !== 'osc-array'
+    && next.kind !== 'osc-3d'
+  ) {
     next.oscAddress = '';
   }
 
-  next.default = clamp(toFinite(next.default, next.min), next.min, next.max);
-  next.nodes = (track.nodes || [])
+  if (next.kind === 'midi') {
+    next.default = normalizeMidiCcValue(next.default, 0);
+  } else if (next.kind === 'midi-note') {
+    next.default = clamp(Math.round(toFinite(next.default, 60)), 0, 127);
+  } else if (next.kind === 'dmx' || next.kind === 'dmx-color') {
+    next.default = normalizeDmxValue(next.default, 0);
+  } else {
+    next.default = clamp(toFinite(next.default, next.min), next.min, next.max);
+  }
+  next.nodes = next.kind === 'group'
+    ? []
+    : (track.nodes || [])
     .map((node) => {
       const normalized = {
         id: node.id ?? createNodeId(),
@@ -434,7 +576,7 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
         v: next.kind === 'osc-flag'
           ? toFinite(node.v, 1)
           : clamp(toFinite(node.v, next.default), next.min, next.max),
-        curve: node.curve || 'linear',
+        curve: normalizeCurveMode(node.curve),
       };
       if (next.kind === 'osc-flag') {
         normalized.a = normalizeOscAddress(
@@ -467,9 +609,27 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
         );
         normalized.v = normalized.arr[0] ?? normalized.v;
       }
+      if (next.kind === 'osc-3d') {
+        const bounds = normalizeOsc3dSettings(next.osc3d).bounds;
+        const fallbackX = (bounds.xMin + bounds.xMax) * 0.5;
+        const fallbackY = clamp(toFinite(node?.v, next.default), bounds.yMin, bounds.yMax);
+        const fallbackZ = (bounds.zMin + bounds.zMax) * 0.5;
+        const raw = Array.isArray(node?.arr) ? node.arr : [];
+        const x = clamp(toFinite(raw[0], fallbackX), bounds.xMin, bounds.xMax);
+        const y = clamp(toFinite(raw[1], fallbackY), bounds.yMin, bounds.yMax);
+        const z = clamp(toFinite(raw[2], fallbackZ), bounds.zMin, bounds.zMax);
+        normalized.arr = [x, y, z];
+        normalized.v = y;
+      }
       if (next.kind === 'midi-note') {
         normalized.v = clamp(Math.round(toFinite(node?.v, next.default)), 0, 127);
         normalized.d = Math.max(toFinite(node?.d, 0.5), 0.01);
+      }
+      if (next.kind === 'midi') {
+        normalized.v = normalizeMidiCcValue(node?.v, next.default);
+      }
+      if (next.kind === 'dmx' || next.kind === 'dmx-color') {
+        normalized.v = normalizeDmxValue(node?.v, next.default);
       }
       return normalized;
     })
@@ -546,7 +706,7 @@ const normalizeTracks = (tracks, oscOutputIds = new Set([DEFAULT_OSC_OUTPUT_ID])
   const safeFallback = safeOutputIds.has(fallbackOscOutputId)
     ? fallbackOscOutputId
     : (safeOutputIds.values().next().value || DEFAULT_OSC_OUTPUT_ID);
-  return (Array.isArray(tracks) ? tracks : [])
+  const normalizedTracks = (Array.isArray(tracks) ? tracks : [])
     .map((track, index) => {
       const normalized = normalizeTrack(track, pickTrackColor(index + 1));
       if (isOscTrackKind(normalized.kind)) {
@@ -560,6 +720,22 @@ const normalizeTracks = (tracks, oscOutputIds = new Set([DEFAULT_OSC_OUTPUT_ID])
       }
       return normalized;
     });
+  const groupIds = new Set(
+    normalizedTracks
+      .filter((track) => track.kind === 'group')
+      .map((track) => track.id)
+  );
+  normalizedTracks.forEach((track) => {
+    if (track.kind === 'group') {
+      track.groupId = '';
+      return;
+    }
+    if (track.groupId === null) return;
+    if (!track.groupId || !groupIds.has(track.groupId) || track.groupId === track.id) {
+      track.groupId = '';
+    }
+  });
+  return normalizedTracks;
 };
 
 const normalizeComposition = (
@@ -747,12 +923,16 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
   const name =
     kind === 'audio'
       ? `Audio ${String(index).padStart(2, '0')}`
+      : kind === 'group'
+        ? `Group ${String(index).padStart(2, '0')}`
       : kind === 'midi'
         ? `MIDI CC ${String(index).padStart(2, '0')}`
       : kind === 'midi-note'
         ? `MIDI Note ${String(index).padStart(2, '0')}`
       : kind === 'osc-array'
         ? `OSC Array ${String(index).padStart(2, '0')}`
+      : kind === 'osc-3d'
+        ? `3D OSC ${String(index).padStart(2, '0')}`
       : kind === 'osc-color'
           ? `OSC Color ${String(index).padStart(2, '0')}`
         : kind === 'osc-flag'
@@ -762,25 +942,44 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
         : kind === 'dmx'
           ? `DMX ${String(index).padStart(2, '0')}`
         : `Track ${String(index).padStart(2, '0')}`;
-  const min = kind === 'midi' || kind === 'midi-note' || kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color' ? 0 : 0;
+  const min = kind === 'osc-3d'
+    ? DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.yMin
+    : (kind === 'midi' || kind === 'midi-note' || kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color'
+      ? 0
+      : 0);
   const max = kind === 'midi' || kind === 'midi-note'
     ? 127
-    : ((kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color') ? 255 : 1);
+    : (kind === 'osc-3d'
+      ? DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.yMax
+      : ((kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color') ? 255 : 1));
   const def = kind === 'audio'
     ? 1
     : (
+      kind === 'group'
+        ? 0
+        : (
       kind === 'midi' || kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color'
         ? 0
         : (
           kind === 'midi-note'
             ? 60
-            : (kind === 'osc-flag' ? 1 : (kind === 'osc-array' ? 0 : 0.5))
+            : (
+              kind === 'osc-flag'
+                ? 1
+                : (kind === 'osc-array'
+                  ? 0
+                  : (kind === 'osc-3d'
+                    ? (DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.yMin + DEFAULT_OSC_3D_TRACK_SETTINGS.bounds.yMax) * 0.5
+                    : 0.5))
+            )
+        )
         )
     );
   const base = {
     id,
     name,
     kind,
+    groupId: '',
     color: pickTrackColor(index),
     mute: false,
     solo: false,
@@ -794,15 +993,17 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
           : DEFAULT_OSC_OUTPUT_ID
       )
       : '',
-    oscValueType: kind === 'osc' || kind === 'osc-array' ? 'float' : '',
+    oscValueType: kind === 'osc' || kind === 'osc-array' || kind === 'osc-flag' || kind === 'osc-3d' ? 'float' : '',
     oscAddress:
       kind === 'osc'
         ? `/track/${index}/value`
         : (kind === 'osc-array'
           ? `/track/${index}/send`
-        : (kind === 'osc-color'
-          ? `/track/${index}/color`
-          : (kind === 'osc-flag' ? `/track/${index}/flag` : ''))),
+          : (kind === 'osc-3d'
+            ? `/track/${index}/xyz`
+            : (kind === 'osc-color'
+              ? `/track/${index}/color`
+              : (kind === 'osc-flag' ? `/track/${index}/flag` : '')))),
     nodes: [],
   };
   if (kind === 'audio') {
@@ -811,6 +1012,15 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
       audio: {
         ...DEFAULT_AUDIO_TRACK_SETTINGS,
       },
+    };
+  }
+  if (kind === 'group') {
+    return {
+      ...base,
+      group: {
+        expanded: true,
+      },
+      nodes: [],
     };
   }
   if (kind === 'midi') {
@@ -964,6 +1174,39 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
       oscArray: {
         valueCount,
       },
+    };
+  }
+  if (kind === 'osc-3d') {
+    const osc3dOptions = normalizeOsc3dSettings(options.osc3d);
+    const safeLength = Math.max(Number(view?.length) || 0, 1);
+    const bounds = osc3dOptions.bounds;
+    const startValues = [
+      (bounds.xMin + bounds.xMax) * 0.5,
+      (bounds.yMin + bounds.yMax) * 0.5,
+      (bounds.zMin + bounds.zMax) * 0.5,
+    ];
+    return {
+      ...base,
+      min: bounds.yMin,
+      max: bounds.yMax,
+      default: startValues[1],
+      nodes: [
+        {
+          id: createNodeId(),
+          t: 0,
+          v: startValues[1],
+          arr: [...startValues],
+          curve: 'linear',
+        },
+        {
+          id: createNodeId(),
+          t: safeLength,
+          v: startValues[1],
+          arr: [...startValues],
+          curve: 'linear',
+        },
+      ],
+      osc3d: osc3dOptions,
     };
   }
   if (kind === 'dmx-color') {
@@ -1598,15 +1841,22 @@ const reduceProjectState = (state, action) => {
         const dmxColorPatch = action.patch.dmxColor || {};
         const oscColorPatch = action.patch.oscColor || {};
         const oscArrayPatch = action.patch.oscArray || {};
+        const osc3dPatch = action.patch.osc3d || {};
         return normalizeTrack({
           ...track,
           ...action.patch,
+          group: { ...track.group, ...action.patch.group },
           audio: { ...track.audio, ...action.patch.audio },
           midi: { ...track.midi, ...action.patch.midi },
           dmx: { ...track.dmx, ...action.patch.dmx },
           oscArray: {
             ...track.oscArray,
             ...oscArrayPatch,
+          },
+          osc3d: {
+            ...track.osc3d,
+            ...osc3dPatch,
+            bounds: { ...track.osc3d?.bounds, ...osc3dPatch.bounds },
           },
           oscColor: {
             ...track.oscColor,
@@ -1685,6 +1935,10 @@ const reduceProjectState = (state, action) => {
           ...action.node,
           v: track.kind === 'osc-flag'
             ? toFinite(action.node?.v, 1)
+            : track.kind === 'midi'
+              ? normalizeMidiCcValue(action.node?.v, track.default)
+            : (track.kind === 'dmx' || track.kind === 'dmx-color')
+              ? normalizeDmxValue(action.node?.v, track.default)
             : track.kind === 'midi-note'
               ? clamp(Math.round(toFinite(action.node?.v, track.default)), 0, 127)
             : clamp(action.node.v, track.min, track.max),
@@ -1720,6 +1974,22 @@ const reduceProjectState = (state, action) => {
           );
           node.v = node.arr[0] ?? node.v;
         }
+        if (track.kind === 'osc-3d') {
+          const bounds = normalizeOsc3dSettings(track.osc3d).bounds;
+          const raw = Array.isArray(action.node?.arr) ? action.node.arr : [];
+          const xFallback = (bounds.xMin + bounds.xMax) * 0.5;
+          const yFallback = clamp(
+            toFinite(action.node?.v, track.default),
+            bounds.yMin,
+            bounds.yMax
+          );
+          const zFallback = (bounds.zMin + bounds.zMax) * 0.5;
+          const x = clamp(toFinite(raw[0], xFallback), bounds.xMin, bounds.xMax);
+          const y = clamp(toFinite(raw[1], yFallback), bounds.yMin, bounds.yMax);
+          const z = clamp(toFinite(raw[2], zFallback), bounds.zMin, bounds.zMax);
+          node.arr = [x, y, z];
+          node.v = y;
+        }
         if (track.kind === 'midi-note') {
           node.d = Math.max(toFinite(action.node?.d, 0.5), 0.01);
         }
@@ -1744,6 +2014,10 @@ const reduceProjectState = (state, action) => {
           t: Math.max(toFinite(node?.t, 0), 0),
           v: track.kind === 'osc-flag'
             ? toFinite(node?.v, 1)
+            : track.kind === 'midi'
+              ? normalizeMidiCcValue(node?.v, track.default)
+            : (track.kind === 'dmx' || track.kind === 'dmx-color')
+              ? normalizeDmxValue(node?.v, track.default)
             : track.kind === 'midi-note'
               ? clamp(Math.round(toFinite(node?.v, track.default)), 0, 127)
             : clamp(toFinite(node?.v, track.default), track.min, track.max),
@@ -1784,16 +2058,34 @@ const reduceProjectState = (state, action) => {
               ),
             }
             : {}),
+          ...(track.kind === 'osc-3d'
+            ? (() => {
+              const bounds = normalizeOsc3dSettings(track.osc3d).bounds;
+              const raw = Array.isArray(node?.arr) ? node.arr : [];
+              const xFallback = (bounds.xMin + bounds.xMax) * 0.5;
+              const yFallback = clamp(toFinite(node?.v, track.default), bounds.yMin, bounds.yMax);
+              const zFallback = (bounds.zMin + bounds.zMax) * 0.5;
+              const x = clamp(toFinite(raw[0], xFallback), bounds.xMin, bounds.xMax);
+              const y = clamp(toFinite(raw[1], yFallback), bounds.yMin, bounds.yMax);
+              const z = clamp(toFinite(raw[2], zFallback), bounds.zMin, bounds.zMax);
+              return {
+                arr: [x, y, z],
+                v: y,
+              };
+            })()
+            : {}),
           ...(track.kind === 'midi-note'
             ? {
               d: Math.max(toFinite(node?.d, 0.5), 0.01),
             }
             : {}),
         }));
-        nodes.forEach((node) => {
-          if (!Array.isArray(node.arr)) return;
-          node.v = Number.isFinite(node.arr[0]) ? node.arr[0] : node.v;
-        });
+        if (track.kind === 'osc-array') {
+          nodes.forEach((node) => {
+            if (!Array.isArray(node.arr)) return;
+            node.v = Number.isFinite(node.arr[0]) ? node.arr[0] : node.v;
+          });
+        }
         return normalizeTrack({
           ...track,
           nodes: [...track.nodes, ...nodes],

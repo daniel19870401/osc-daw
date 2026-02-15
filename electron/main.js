@@ -600,7 +600,7 @@ const resolveAppIcon = () => {
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 1560,
-    height: 860,
+    height: 960,
     minWidth: 1200,
     minHeight: 640,
     backgroundColor: '#0f1115',
@@ -611,6 +611,15 @@ const createWindow = () => {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+
+  win.webContents.on('before-input-event', (event, input) => {
+    if (!input || input.type !== 'keyDown') return;
+    const key = typeof input.key === 'string' ? input.key.toLowerCase() : '';
+    const hasCommandOrControl = Boolean(input.meta || input.control);
+    if (hasCommandOrControl && key === 'r') {
+      event.preventDefault();
+    }
   });
 
   if (useDevServer) {

@@ -4,8 +4,13 @@ import {
   TIMELINE_WIDTH,
   clamp,
 } from '../utils/timelineMetrics.js';
+import {
+  CURVE_MENU_ITEMS,
+  formatCurveLabel,
+  getCurveLut,
+  normalizeCurveMode,
+} from '../utils/easingCurves.js';
 
-const CURVE_OPTIONS = ['linear', 'step', 'ease-in', 'ease-out', 'smooth'];
 const MIDI_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 const formatMidiNoteLabel = (value) => {
@@ -20,13 +25,18 @@ export default function NodeEditor({
   view,
   height,
   width,
+  curveFps = 30,
   accentColor = '#5dd8c7',
   suspendRendering = false,
   cues = [],
   isTrackSelected = false,
+  externalSelectedIds = [],
+  onSelectTrack,
   onNodeDrag,
+  onSetNodeCurve,
   onAddNode,
   onEditNode,
+  onDeleteNodes,
   onSelectionChange,
 }) {
   const { nodes, min, max } = track;
@@ -61,22 +71,19 @@ export default function NodeEditor({
   }, [nodeMap]);
 
   useEffect(() => {
-    if (isTrackSelected) return;
-    setSelectedIds([]);
-    setDraggingIds([]);
-    setSelectionBox(null);
-    setContextMenu(null);
-    setSnapGuide(null);
-  }, [isTrackSelected]);
+    const next = Array.isArray(externalSelectedIds) ? externalSelectedIds : [];
+    setSelectedIds((prev) => {
+      const sameLength = prev.length === next.length;
+      const sameNodes = sameLength && prev.every((id, index) => id === next[index]);
+      if (sameNodes) return prev;
+      return next;
+    });
+  }, [externalSelectedIds]);
 
   useEffect(() => {
     if (!onSelectionChange) return;
-    if (!isTrackSelected) {
-      onSelectionChange(track.id, []);
-      return;
-    }
     onSelectionChange(track.id, selectedIds);
-  }, [selectedIds, isTrackSelected, onSelectionChange, track.id]);
+  }, [selectedIds, onSelectionChange, track.id]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -246,35 +253,29 @@ export default function NodeEditor({
       const ay = mapValue(a.v);
       const bx = mapTimeToLocalX(b.t);
       const by = mapValue(b.v);
-      const dx = bx - ax;
-      const mode = a.curve || 'linear';
-      if (mode === 'step') {
+      const mode = normalizeCurveMode(a.curve || 'linear');
+      if (mode === 'none') {
         commands.push(`L ${bx} ${ay}`);
         commands.push(`L ${bx} ${by}`);
-      } else if (mode === 'ease-in') {
-        const c1x = ax + dx * 0.45;
-        const c1y = ay;
-        const c2x = bx - dx * 0.05;
-        const c2y = by;
-        commands.push(`C ${c1x} ${c1y}, ${c2x} ${c2y}, ${bx} ${by}`);
-      } else if (mode === 'ease-out') {
-        const c1x = ax + dx * 0.05;
-        const c1y = ay;
-        const c2x = bx - dx * 0.45;
-        const c2y = by;
-        commands.push(`C ${c1x} ${c1y}, ${c2x} ${c2y}, ${bx} ${by}`);
-      } else if (mode === 'smooth') {
-        const c1x = ax + dx * 0.33;
-        const c1y = ay + (by - ay) * 0.1;
-        const c2x = bx - dx * 0.33;
-        const c2y = by - (by - ay) * 0.1;
-        commands.push(`C ${c1x} ${c1y}, ${c2x} ${c2y}, ${bx} ${by}`);
-      } else {
+        continue;
+      }
+      if (mode === 'linear') {
         commands.push(`L ${bx} ${by}`);
+        continue;
+      }
+      const lut = getCurveLut(mode, curveFps);
+      const sampleCount = Math.max(Number(lut?.density) || 8, 8);
+      const values = Array.isArray(lut?.values) ? lut.values : [];
+      for (let step = 1; step <= sampleCount; step += 1) {
+        const t = step / sampleCount;
+        const curveT = values[step] ?? values[values.length - 1] ?? t;
+        const x = ax + (bx - ax) * t;
+        const y = ay + (by - ay) * curveT;
+        commands.push(`L ${x} ${y}`);
       }
     }
     return commands.join(' ');
-  }, [displayedNodes, view.start, view.end, min, max, height, contentWidth, isMidiNote]);
+  }, [displayedNodes, view.start, view.end, min, max, height, contentWidth, isMidiNote, curveFps]);
 
   const gridLines = useMemo(
     () => Array.from({ length: 9 }, (_, index) => (
@@ -313,6 +314,7 @@ export default function NodeEditor({
   const startNodeDrag = (event, nodeId) => {
     if (event.button !== 0) return;
     event.stopPropagation();
+    if (onSelectTrack) onSelectTrack(track.id);
     setContextMenu(null);
 
     let nextSelection = selectedIds;
@@ -359,6 +361,7 @@ export default function NodeEditor({
   const startMarquee = (event) => {
     if (event.button !== 0) return;
     if (isNodeTarget(event.target)) return;
+    if (onSelectTrack) onSelectTrack(track.id);
     setContextMenu(null);
     const start = getPointerPosition(event);
     dragRef.current = {
@@ -440,24 +443,23 @@ export default function NodeEditor({
 
   const handleNodeClick = (event, nodeId) => {
     event.stopPropagation();
-    if (event.shiftKey) {
-      setSelectedIds((prev) => (
-        prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId]
-      ));
-      return;
+    if (onSelectTrack) onSelectTrack(track.id);
+    // Selection is resolved in pointer-down to avoid shift-click double-toggle flicker.
+    if (event.shiftKey) return;
+    if (!selectedSet.has(nodeId)) {
+      setSelectedIds([nodeId]);
     }
-    setSelectedIds([nodeId]);
   };
 
   const handleNodeDoubleClick = (event, node) => {
     event.preventDefault();
     event.stopPropagation();
+    if (onSelectTrack) onSelectTrack(track.id);
     setSelectedIds([node.id]);
     if (onEditNode) onEditNode(node.id, node.v, isMidiNote ? 'midi-note' : 'value');
   };
 
   const handleNodeContextMenu = (event, nodeId) => {
-    if (isOscFlag || isMidiNote) return;
     event.preventDefault();
     event.stopPropagation();
     if (!selectedSet.has(nodeId)) {
@@ -470,10 +472,35 @@ export default function NodeEditor({
     });
   };
 
+  const editContextNode = () => {
+    if (!contextMenu) return;
+    const node = nodeMap.get(contextMenu.nodeId);
+    if (!node) {
+      setContextMenu(null);
+      return;
+    }
+    if (onSelectTrack) onSelectTrack(track.id);
+    setSelectedIds([node.id]);
+    if (onEditNode) onEditNode(node.id, node.v, isMidiNote ? 'midi-note' : 'value');
+    setContextMenu(null);
+  };
+
+  const deleteContextNodes = () => {
+    if (!contextMenu || !onDeleteNodes) return;
+    const targetIds = selectedSet.has(contextMenu.nodeId) && selectedIds.length
+      ? selectedIds
+      : [contextMenu.nodeId];
+    onDeleteNodes(targetIds);
+    setSelectedIds((prev) => prev.filter((id) => !targetIds.includes(id)));
+    setDraggingIds((prev) => prev.filter((id) => !targetIds.includes(id)));
+    setContextMenu(null);
+  };
+
   const handleBackgroundDoubleClick = (event) => {
     if (isNodeTarget(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (onSelectTrack) onSelectTrack(track.id);
     const { x, y } = getPointerPosition(event);
     if (isOscFlag) {
       onAddNode({
@@ -506,7 +533,11 @@ export default function NodeEditor({
     const targetIds = selectedSet.has(contextMenu.nodeId) && selectedIds.length
       ? selectedIds
       : [contextMenu.nodeId];
-    targetIds.forEach((id) => onNodeDrag(id, { curve }));
+    if (onSetNodeCurve) {
+      onSetNodeCurve(targetIds, curve);
+    } else {
+      targetIds.forEach((id) => onNodeDrag(id, { curve }));
+    }
     setContextMenu(null);
   };
 
@@ -580,6 +611,8 @@ export default function NodeEditor({
           return (
             <g
               key={node.id}
+              data-selectable-node="1"
+              data-track-id={track.id}
               data-node-id={node.id}
               className={`node-editor__node ${isDragging ? 'is-dragging' : ''} ${isSelected ? 'is-selected' : ''}`}
               onPointerDown={(event) => startNodeDrag(event, node.id)}
@@ -714,17 +747,35 @@ export default function NodeEditor({
           </>
         )}
       </svg>
-      {!isOscFlag && !isMidiNote && contextMenu && (
+      {contextMenu && (
         <div className="node-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
-          {CURVE_OPTIONS.map((curve) => (
-            <button
-              key={curve}
-              className="node-context-menu__item"
-              onClick={() => applyCurve(curve)}
-            >
-              {curve}
-            </button>
-          ))}
+          <button
+            className="node-context-menu__item"
+            onClick={editContextNode}
+          >
+            Edit Node
+          </button>
+          <button
+            className="node-context-menu__item"
+            onClick={deleteContextNodes}
+          >
+            Delete Node
+          </button>
+          {!isOscFlag && !isMidiNote && <div className="node-context-menu__separator" />}
+          {!isOscFlag && !isMidiNote && CURVE_MENU_ITEMS.map((item, index) => {
+            if (item.separator) {
+              return <div key={`sep-${index}`} className="node-context-menu__separator" />;
+            }
+            return (
+              <button
+                key={item.id}
+                className="node-context-menu__item"
+                onClick={() => applyCurve(item.id)}
+              >
+                {formatCurveLabel(item.id)}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

@@ -72,10 +72,13 @@ export default function DmxColorEditor({
   width,
   suspendRendering = false,
   isTrackSelected = false,
+  externalSelectedIds = [],
+  onSelectTrack,
   cues = [],
   onNodeDrag,
   onAddNode,
   onEditNode,
+  onDeleteNodes,
   onSelectionChange,
 }) {
   const colorConfig = track.kind === 'osc-color' ? (track.oscColor || {}) : (track.dmxColor || {});
@@ -97,6 +100,7 @@ export default function DmxColorEditor({
 
   const [selectedIds, setSelectedIds] = useState([]);
   const [snapGuide, setSnapGuide] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const dragRef = useRef(null);
   const svgRef = useRef(null);
@@ -116,18 +120,37 @@ export default function DmxColorEditor({
   }, [sortedNodes]);
 
   useEffect(() => {
-    if (isTrackSelected) return;
-    setSelectedIds([]);
-  }, [isTrackSelected]);
+    const next = Array.isArray(externalSelectedIds) ? externalSelectedIds : [];
+    setSelectedIds((prev) => {
+      const sameLength = prev.length === next.length;
+      const sameNodes = sameLength && prev.every((id, index) => id === next[index]);
+      if (sameNodes) return prev;
+      return next;
+    });
+  }, [externalSelectedIds]);
 
   useEffect(() => {
     if (!onSelectionChange) return;
-    if (!isTrackSelected) {
-      onSelectionChange(track.id, []);
-      return;
-    }
     onSelectionChange(track.id, selectedIds);
-  }, [isTrackSelected, onSelectionChange, selectedIds, track.id]);
+  }, [onSelectionChange, selectedIds, track.id]);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const handleOutsidePointer = (event) => {
+      const target = event.target;
+      if (target?.closest?.('.node-context-menu')) return;
+      setContextMenu(null);
+    };
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') setContextMenu(null);
+    };
+    window.addEventListener('pointerdown', handleOutsidePointer, true);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('pointerdown', handleOutsidePointer, true);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [contextMenu]);
 
   const mapTimeToLocalX = (time) => {
     const span = Math.max(view.end - view.start, 0.0001);
@@ -220,6 +243,19 @@ export default function DmxColorEditor({
   const startStopDrag = (event, node) => {
     if (event.button !== 0) return;
     event.stopPropagation();
+    if (onSelectTrack) onSelectTrack(track.id);
+    setContextMenu(null);
+    if (event.shiftKey) {
+      setSelectedIds((prev) => {
+        if (prev.includes(node.id)) {
+          const next = prev.filter((id) => id !== node.id);
+          return next.length ? next : [node.id];
+        }
+        return [...prev, node.id];
+      });
+      dragRef.current = null;
+      return;
+    }
     const pointer = getPointerPosition(event);
     setSelectedIds([node.id]);
     dragRef.current = {
@@ -231,6 +267,42 @@ export default function DmxColorEditor({
       originT: node.t,
       originV: node.v,
     };
+  };
+
+  const handleNodeContextMenu = (event, nodeId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!selectedSet.has(nodeId)) {
+      setSelectedIds([nodeId]);
+    }
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      nodeId,
+    });
+  };
+
+  const editContextNode = () => {
+    if (!contextMenu) return;
+    const node = sortedNodes.find((item) => item.id === contextMenu.nodeId);
+    if (!node) {
+      setContextMenu(null);
+      return;
+    }
+    if (onSelectTrack) onSelectTrack(track.id);
+    setSelectedIds([node.id]);
+    if (onEditNode) onEditNode(node.id, node.v, 'color', resolveNodeColor(node));
+    setContextMenu(null);
+  };
+
+  const deleteContextNodes = () => {
+    if (!contextMenu || !onDeleteNodes) return;
+    const targetIds = selectedSet.has(contextMenu.nodeId) && selectedIds.length
+      ? selectedIds
+      : [contextMenu.nodeId];
+    onDeleteNodes(targetIds);
+    setSelectedIds((prev) => prev.filter((id) => !targetIds.includes(id)));
+    setContextMenu(null);
   };
 
   const getClosestCueTime = (time) => {
@@ -252,6 +324,7 @@ export default function DmxColorEditor({
     if (event.button !== 0) return;
     if (!segment.leftId || !segment.rightId) return;
     event.stopPropagation();
+    if (onSelectTrack) onSelectTrack(track.id);
     const leftIndex = nodeIndexById.get(segment.leftId);
     const rightIndex = nodeIndexById.get(segment.rightId);
     if (!Number.isInteger(leftIndex) || !Number.isInteger(rightIndex)) return;
@@ -324,6 +397,8 @@ export default function DmxColorEditor({
     event.preventDefault();
     const target = event.target;
     if (target?.dataset?.stopHandle === '1') return;
+    if (onSelectTrack) onSelectTrack(track.id);
+    setContextMenu(null);
     const pointer = getPointerPosition(event);
     const fallbackColor = valueToColor(fallbackValue);
     const sampledColor = sampleHexColorAtTime(coloredNodes, timeFromX(pointer.x), fallbackColor);
@@ -417,16 +492,25 @@ export default function DmxColorEditor({
           return (
             <g
               key={node.id}
+              data-selectable-node="1"
+              data-track-id={track.id}
+              data-node-id={node.id}
               data-stop-handle="1"
               className={`dmx-color-editor__stop${selectedSet.has(node.id) ? ' is-selected' : ''}`}
               onPointerDown={(event) => startStopDrag(event, node)}
+              onContextMenu={(event) => handleNodeContextMenu(event, node.id)}
               onClick={(event) => {
                 event.stopPropagation();
-                setSelectedIds([node.id]);
+                if (onSelectTrack) onSelectTrack(track.id);
+                if (event.shiftKey) return;
+                if (!selectedSet.has(node.id)) {
+                  setSelectedIds([node.id]);
+                }
               }}
               onDoubleClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
+                if (onSelectTrack) onSelectTrack(track.id);
                 dragRef.current = null;
                 setSelectedIds([node.id]);
                 if (onEditNode) onEditNode(node.id, node.v, 'color', color);
@@ -454,6 +538,22 @@ export default function DmxColorEditor({
           );
         })}
       </svg>
+      {contextMenu && (
+        <div className="node-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+          <button
+            className="node-context-menu__item"
+            onClick={editContextNode}
+          >
+            Edit Node
+          </button>
+          <button
+            className="node-context-menu__item"
+            onClick={deleteContextNodes}
+          >
+            Delete Node
+          </button>
+        </div>
+      )}
     </div>
   );
 }

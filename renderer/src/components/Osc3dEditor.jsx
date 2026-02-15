@@ -12,47 +12,55 @@ import {
   normalizeCurveMode,
 } from '../utils/easingCurves.js';
 
-const LINE_COLORS = [
-  '#5dd8c7',
-  '#ffb458',
-  '#66a3ff',
-  '#f472b6',
-  '#34d399',
-  '#a78bfa',
-  '#f87171',
-  '#22d3ee',
-  '#facc15',
-  '#94a3b8',
-  '#7dd3fc',
-  '#fdba74',
-  '#c4b5fd',
-  '#bef264',
-  '#fda4af',
-  '#86efac',
-  '#f9a8d4',
-  '#fcd34d',
-  '#67e8f9',
-  '#d8b4fe',
+const AXIS_META = [
+  { key: 'x', color: '#58d5ff', minKey: 'xMin', maxKey: 'xMax' },
+  { key: 'y', color: '#7dff8a', minKey: 'yMin', maxKey: 'yMax' },
+  { key: 'z', color: '#ffb967', minKey: 'zMin', maxKey: 'zMax' },
 ];
-const getValueCount = (track) => clamp(Math.round(Number(track?.oscArray?.valueCount) || 5), 1, 20);
+
+const getBounds = (track) => {
+  const raw = track?.osc3d?.bounds || {};
+  const normalizeAxis = (rawMin, rawMax, fallbackMin, fallbackMax) => {
+    const min = Number.isFinite(Number(rawMin)) ? Number(rawMin) : fallbackMin;
+    const max = Number.isFinite(Number(rawMax)) ? Number(rawMax) : fallbackMax;
+    if (min <= max) return { min, max };
+    return { min: max, max: min };
+  };
+  const x = normalizeAxis(raw.xMin, raw.xMax, -1, 1);
+  const y = normalizeAxis(raw.yMin, raw.yMax, -1, 1);
+  const z = normalizeAxis(raw.zMin, raw.zMax, -1, 1);
+  return {
+    xMin: x.min,
+    xMax: x.max,
+    yMin: y.min,
+    yMax: y.max,
+    zMin: z.min,
+    zMax: z.max,
+  };
+};
 
 const normalizeNodeValues = (track, node) => {
-  const count = getValueCount(track);
-  const min = Number.isFinite(track?.min) ? Number(track.min) : 0;
-  const max = Number.isFinite(track?.max) ? Number(track.max) : 1;
-  const fallback = clamp(Number(node?.v ?? track?.default ?? 0) || 0, min, max);
+  const bounds = getBounds(track);
   const raw = Array.isArray(node?.arr) ? node.arr : [];
-  return Array.from({ length: count }, (_, index) => (
-    clamp(Number(raw[index] ?? fallback) || 0, min, max)
-  ));
+  const fallback = [
+    (bounds.xMin + bounds.xMax) * 0.5,
+    Number.isFinite(Number(node?.v)) ? Number(node.v) : ((bounds.yMin + bounds.yMax) * 0.5),
+    (bounds.zMin + bounds.zMax) * 0.5,
+  ];
+  return [
+    clamp(Number.isFinite(Number(raw[0])) ? Number(raw[0]) : fallback[0], bounds.xMin, bounds.xMax),
+    clamp(Number.isFinite(Number(raw[1])) ? Number(raw[1]) : fallback[1], bounds.yMin, bounds.yMax),
+    clamp(Number.isFinite(Number(raw[2])) ? Number(raw[2]) : fallback[2], bounds.zMin, bounds.zMax),
+  ];
 };
 
 const sampleValuesAtTime = (track, sortedNodes, time, curveFps = 30) => {
-  const count = getValueCount(track);
-  const min = Number.isFinite(track?.min) ? Number(track.min) : 0;
-  const max = Number.isFinite(track?.max) ? Number(track.max) : 1;
-  const defaultValue = clamp(Number(track?.default ?? 0) || 0, min, max);
-  const fallback = Array.from({ length: count }, () => defaultValue);
+  const bounds = getBounds(track);
+  const fallback = [
+    (bounds.xMin + bounds.xMax) * 0.5,
+    (bounds.yMin + bounds.yMax) * 0.5,
+    (bounds.zMin + bounds.zMax) * 0.5,
+  ];
   if (!sortedNodes.length) return fallback;
   if (time <= sortedNodes[0].t) return normalizeNodeValues(track, sortedNodes[0]);
   if (time >= sortedNodes[sortedNodes.length - 1].t) return normalizeNodeValues(track, sortedNodes[sortedNodes.length - 1]);
@@ -64,12 +72,16 @@ const sampleValuesAtTime = (track, sortedNodes, time, curveFps = 30) => {
     const bValues = normalizeNodeValues(track, b);
     if (Math.abs(b.t - a.t) < 1e-9) return bValues;
     const ratio = getCurveValueRatioByFps((time - a.t) / (b.t - a.t), a.curve, curveFps);
-    return aValues.map((value, index) => clamp(value + (bValues[index] - value) * ratio, min, max));
+    return [
+      clamp(aValues[0] + (bValues[0] - aValues[0]) * ratio, bounds.xMin, bounds.xMax),
+      clamp(aValues[1] + (bValues[1] - aValues[1]) * ratio, bounds.yMin, bounds.yMax),
+      clamp(aValues[2] + (bValues[2] - aValues[2]) * ratio, bounds.zMin, bounds.zMax),
+    ];
   }
   return normalizeNodeValues(track, sortedNodes[sortedNodes.length - 1]);
 };
 
-export default function OscArrayEditor({
+export default function Osc3dEditor({
   track,
   view,
   height,
@@ -91,9 +103,7 @@ export default function OscArrayEditor({
     () => (Array.isArray(track.nodes) ? [...track.nodes].sort((a, b) => a.t - b.t) : []),
     [track.nodes]
   );
-  const valueCount = getValueCount(track);
-  const min = Number.isFinite(track.min) ? Number(track.min) : 0;
-  const max = Number.isFinite(track.max) ? Number(track.max) : 1;
+  const bounds = useMemo(() => getBounds(track), [track]);
   const contentWidth = Math.max(Number(width) || TIMELINE_WIDTH, TIMELINE_PADDING * 2 + 1);
   const epsilon = Math.max((view.end - view.start) / Math.max(contentWidth - TIMELINE_PADDING * 2, 1), 0.0001);
   const svgRef = useRef(null);
@@ -164,9 +174,12 @@ export default function OscArrayEditor({
     return clamp(time, 0, view.length ?? view.end);
   };
 
-  const mapValueToY = (value) => {
-    const range = Math.max(max - min, 1e-6);
-    const ratio = clamp((value - min) / range, 0, 1);
+  const mapAxisValueToY = (axisIndex, value) => {
+    const axis = AXIS_META[axisIndex] || AXIS_META[1];
+    const min = bounds[axis.minKey];
+    const max = bounds[axis.maxKey];
+    const span = Math.max(max - min, 1e-9);
+    const ratio = clamp((value - min) / span, 0, 1);
     return height - TIMELINE_PADDING - ratio * (height - TIMELINE_PADDING * 2);
   };
 
@@ -239,7 +252,7 @@ export default function OscArrayEditor({
     }
     if (onSelectTrack) onSelectTrack(track.id);
     setSelectedIds([node.id]);
-    if (onEditNode) onEditNode(node.id, node.v, 'osc-array');
+    if (onEditNode) onEditNode(node.id, node.v, 'osc-3d');
     setContextMenu(null);
   };
 
@@ -306,7 +319,7 @@ export default function OscArrayEditor({
     const values = sampleValuesAtTime(track, sortedNodes, t, curveFps);
     onAddNode({
       t,
-      v: values[0] ?? 0,
+      v: values[1] ?? 0,
       arr: values,
       curve: 'linear',
     });
@@ -321,16 +334,11 @@ export default function OscArrayEditor({
 
   const linePaths = useMemo(() => {
     if (suspendRendering || !sortedNodes.length) return [];
-    return Array.from({ length: valueCount }, (_, channelIndex) => {
+    return AXIS_META.map((axis, axisIndex) => {
       const commands = [];
-      if (!sortedNodes.length) return {
-        color: LINE_COLORS[channelIndex % LINE_COLORS.length],
-        path: '',
-        index: channelIndex,
-      };
       const firstValues = normalizeNodeValues(track, sortedNodes[0]);
       const firstX = mapTimeToLocalX(sortedNodes[0].t);
-      const firstY = mapValueToY(firstValues[channelIndex]);
+      const firstY = mapAxisValueToY(axisIndex, firstValues[axisIndex]);
       commands.push(`M ${firstX} ${firstY}`);
       for (let i = 0; i < sortedNodes.length - 1; i += 1) {
         const a = sortedNodes[i];
@@ -338,9 +346,9 @@ export default function OscArrayEditor({
         const aValues = normalizeNodeValues(track, a);
         const bValues = normalizeNodeValues(track, b);
         const ax = mapTimeToLocalX(a.t);
-        const ay = mapValueToY(aValues[channelIndex]);
+        const ay = mapAxisValueToY(axisIndex, aValues[axisIndex]);
         const bx = mapTimeToLocalX(b.t);
-        const by = mapValueToY(bValues[channelIndex]);
+        const by = mapAxisValueToY(axisIndex, bValues[axisIndex]);
         const mode = normalizeCurveMode(a.curve || 'linear');
         if (mode === 'none') {
           commands.push(`L ${bx} ${ay}`);
@@ -363,22 +371,22 @@ export default function OscArrayEditor({
         }
       }
       return {
-        color: LINE_COLORS[channelIndex % LINE_COLORS.length],
+        axisKey: axis.key,
+        color: axis.color,
         path: commands.join(' '),
-        index: channelIndex,
       };
     });
-  }, [mapTimeToLocalX, mapValueToY, sortedNodes, suspendRendering, track, valueCount, curveFps]);
+  }, [suspendRendering, sortedNodes, track, curveFps, contentWidth, view.start, view.end, height]);
 
   const rectWidth = 10;
   const rectY = TIMELINE_PADDING;
   const rectHeight = Math.max(height - TIMELINE_PADDING * 2, 1);
 
   return (
-    <div className="osc-array-editor-wrap">
+    <div className="osc-3d-editor-wrap">
       <svg
         ref={svgRef}
-        className="osc-array-editor"
+        className="osc-3d-editor"
         viewBox={`0 0 ${contentWidth} ${height}`}
         preserveAspectRatio="none"
         onPointerMove={handlePointerMove}
@@ -387,7 +395,7 @@ export default function OscArrayEditor({
         onPointerLeave={stopDrag}
         onDoubleClick={handleBackgroundDoubleClick}
       >
-        <rect x="0" y="0" width={contentWidth} height={height} className="osc-array-editor__bg" />
+        <rect x="0" y="0" width={contentWidth} height={height} className="osc-3d-editor__bg" />
         {gridLines.map((x) => (
           <line
             key={`grid-${x}`}
@@ -395,14 +403,14 @@ export default function OscArrayEditor({
             y1={TIMELINE_PADDING}
             x2={x}
             y2={height - TIMELINE_PADDING}
-            className="osc-array-editor__grid"
+            className="osc-3d-editor__grid"
           />
         ))}
         {linePaths.map((line) => (
           <path
-            key={`path-${line.index}`}
+            key={`path-${line.axisKey}`}
             d={line.path}
-            className="osc-array-editor__line"
+            className="osc-3d-editor__line"
             style={{ stroke: line.color }}
           />
         ))}
@@ -412,7 +420,7 @@ export default function OscArrayEditor({
             y1={TIMELINE_PADDING}
             x2={mapTimeToLocalX(snapGuide)}
             y2={height - TIMELINE_PADDING}
-            className="osc-array-editor__snap"
+            className="osc-3d-editor__snap"
           />
         )}
         {!suspendRendering && sortedNodes.map((node) => {
@@ -424,7 +432,7 @@ export default function OscArrayEditor({
               data-selectable-node="1"
               data-track-id={track.id}
               data-node-id={node.id}
-              className={`osc-array-editor__node ${isSelected ? 'is-selected' : ''}`}
+              className={`osc-3d-editor__node ${isSelected ? 'is-selected' : ''}`}
               onContextMenu={(event) => handleNodeContextMenu(event, node.id)}
             >
               <rect
@@ -434,16 +442,16 @@ export default function OscArrayEditor({
                 height={rectHeight}
                 rx="2"
                 ry="2"
-                className="osc-array-editor__node-rect"
+                className="osc-3d-editor__node-rect"
                 data-node-rect="1"
-                style={{ fill: 'rgba(15, 19, 28, 0.94)', stroke: LINE_COLORS[0] }}
+                style={{ fill: 'rgba(15, 19, 28, 0.94)', stroke: AXIS_META[0].color }}
                 onPointerDown={(event) => beginDrag(event, node)}
                 onDoubleClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
                   if (onSelectTrack) onSelectTrack(track.id);
                   setSelectedIds([node.id]);
-                  if (onEditNode) onEditNode(node.id, node.v, 'osc-array');
+                  if (onEditNode) onEditNode(node.id, node.v, 'osc-3d');
                 }}
               />
               <rect
@@ -451,7 +459,7 @@ export default function OscArrayEditor({
                 y={rectY}
                 width={rectWidth * 2}
                 height={rectHeight}
-                className="osc-array-editor__hit"
+                className="osc-3d-editor__hit"
                 data-node-rect="1"
                 onPointerDown={(event) => beginDrag(event, node)}
                 onDoubleClick={(event) => {
@@ -459,7 +467,7 @@ export default function OscArrayEditor({
                   event.stopPropagation();
                   if (onSelectTrack) onSelectTrack(track.id);
                   setSelectedIds([node.id]);
-                  if (onEditNode) onEditNode(node.id, node.v, 'osc-array');
+                  if (onEditNode) onEditNode(node.id, node.v, 'osc-3d');
                 }}
               />
             </g>

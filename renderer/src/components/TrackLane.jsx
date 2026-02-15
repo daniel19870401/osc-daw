@@ -2,19 +2,28 @@ import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import NodeEditor from './NodeEditor.jsx';
 import DmxColorEditor from './DmxColorEditor.jsx';
 import OscArrayEditor from './OscArrayEditor.jsx';
+import Osc3dEditor from './Osc3dEditor.jsx';
+import GroupLane from './GroupLane.jsx';
 import { TIMELINE_PADDING } from '../utils/timelineMetrics.js';
 
 function TrackLane({
   track,
+  groupMembers = [],
+  isGroupedChild = false,
   view,
   height,
   timelineWidth,
+  curveFps = 30,
   suspendRendering = false,
   isSelected,
+  externalSelectedNodeIds = [],
   onSelect,
+  onSelectTrack,
   onNodeDrag,
+  onSetNodeCurve,
   onAddNode,
   onEditNode,
+  onDeleteNodes,
   onSelectionChange,
   onMoveAudioClip,
   onEditAudioClipStart,
@@ -22,8 +31,10 @@ function TrackLane({
   cues = [],
 }) {
   const isAudio = track.kind === 'audio';
+  const isGroup = track.kind === 'group';
   const isDmxColor = track.kind === 'dmx-color' || track.kind === 'osc-color';
   const isOscArray = track.kind === 'osc-array';
+  const isOsc3d = track.kind === 'osc-3d';
   const trackColor = typeof track.color === 'string' ? track.color : '#5dd8c7';
   const laneRef = useRef(null);
   const dragRef = useRef(null);
@@ -189,7 +200,7 @@ function TrackLane({
   return (
     <div
       ref={laneRef}
-      className={`track-lane ${isSelected ? 'is-selected' : ''} ${isAudio ? 'track-lane--audio' : ''} ${isDmxColor ? 'track-lane--dmx-color' : ''} ${isOscArray ? 'track-lane--osc-array' : ''}`}
+      className={`track-lane ${isSelected ? 'is-selected' : ''} ${isAudio ? 'track-lane--audio' : ''} ${isGroup ? 'track-lane--group' : ''} ${isGroupedChild ? 'track-lane--group-child' : ''} ${isDmxColor ? 'track-lane--dmx-color' : ''} ${isOscArray ? 'track-lane--osc-array' : ''} ${isOsc3d ? 'track-lane--osc-3d' : ''}`}
       style={{ height, '--track-accent': trackColor }}
       onClick={() => onSelect(track.id)}
       role="button"
@@ -198,7 +209,15 @@ function TrackLane({
         if (event.key === 'Enter') onSelect(track.id);
       }}
     >
-      {isAudio ? (
+      {isGroup ? (
+        <GroupLane
+          track={track}
+          members={groupMembers}
+          view={view}
+          height={height}
+          width={timelineWidth}
+        />
+      ) : isAudio ? (
         <div className="audio-lane" style={{ '--track-accent': trackColor }}>
           {hasAudioClip ? (
             <svg
@@ -250,13 +269,18 @@ function TrackLane({
           view={view}
           height={height}
           width={timelineWidth}
+          curveFps={curveFps}
           accentColor={trackColor}
           suspendRendering={suspendRendering}
           isTrackSelected={isSelected}
+          externalSelectedIds={externalSelectedNodeIds}
+          onSelectTrack={onSelectTrack}
           cues={cues}
           onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
+          onSetNodeCurve={(nodeIds, curve) => onSetNodeCurve?.(track.id, nodeIds, curve)}
           onAddNode={(node) => onAddNode(track.id, node)}
           onEditNode={(nodeId, value, mode, colorHex) => onEditNode(track.id, nodeId, value, mode, colorHex)}
+          onDeleteNodes={(nodeIds) => onDeleteNodes(track.id, nodeIds)}
           onSelectionChange={onSelectionChange}
         />
       ) : isOscArray ? (
@@ -265,12 +289,36 @@ function TrackLane({
           view={view}
           height={height}
           width={timelineWidth}
+          curveFps={curveFps}
           suspendRendering={suspendRendering}
           isTrackSelected={isSelected}
+          externalSelectedIds={externalSelectedNodeIds}
+          onSelectTrack={onSelectTrack}
           cues={cues}
           onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
+          onSetNodeCurve={(nodeIds, curve) => onSetNodeCurve?.(track.id, nodeIds, curve)}
           onAddNode={(node) => onAddNode(track.id, node)}
           onEditNode={(nodeId, value, mode) => onEditNode(track.id, nodeId, value, mode)}
+          onDeleteNodes={(nodeIds) => onDeleteNodes(track.id, nodeIds)}
+          onSelectionChange={onSelectionChange}
+        />
+      ) : isOsc3d ? (
+        <Osc3dEditor
+          track={track}
+          view={view}
+          height={height}
+          width={timelineWidth}
+          curveFps={curveFps}
+          suspendRendering={suspendRendering}
+          isTrackSelected={isSelected}
+          externalSelectedIds={externalSelectedNodeIds}
+          onSelectTrack={onSelectTrack}
+          cues={cues}
+          onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
+          onSetNodeCurve={(nodeIds, curve) => onSetNodeCurve?.(track.id, nodeIds, curve)}
+          onAddNode={(node) => onAddNode(track.id, node)}
+          onEditNode={(nodeId, value, mode) => onEditNode(track.id, nodeId, value, mode)}
+          onDeleteNodes={(nodeIds) => onDeleteNodes(track.id, nodeIds)}
           onSelectionChange={onSelectionChange}
         />
       ) : (
@@ -282,10 +330,14 @@ function TrackLane({
           accentColor={trackColor}
           suspendRendering={suspendRendering}
           isTrackSelected={isSelected}
+          externalSelectedIds={externalSelectedNodeIds}
+          onSelectTrack={onSelectTrack}
           cues={cues}
           onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
+          onSetNodeCurve={(nodeIds, curve) => onSetNodeCurve?.(track.id, nodeIds, curve)}
           onAddNode={(node) => onAddNode(track.id, node)}
           onEditNode={(nodeId, value, mode, colorHex) => onEditNode(track.id, nodeId, value, mode, colorHex)}
+          onDeleteNodes={(nodeIds) => onDeleteNodes(track.id, nodeIds)}
           onSelectionChange={onSelectionChange}
         />
       )}
@@ -295,11 +347,14 @@ function TrackLane({
 
 export default memo(TrackLane, (prev, next) => (
   prev.track === next.track
+  && prev.groupMembers === next.groupMembers
+  && prev.isGroupedChild === next.isGroupedChild
   && prev.view === next.view
   && prev.height === next.height
   && prev.timelineWidth === next.timelineWidth
   && prev.suspendRendering === next.suspendRendering
   && prev.isSelected === next.isSelected
+  && prev.externalSelectedNodeIds === next.externalSelectedNodeIds
   && prev.audioWaveform === next.audioWaveform
   && prev.cues === next.cues
 ));

@@ -1,6 +1,6 @@
 {
   "name": "osconductor",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "OSConductor timeline control app with Electron + React + SVG",
   "main": "electron/main.js",
   "type": "commonjs",

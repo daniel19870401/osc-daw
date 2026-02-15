@@ -395,8 +395,14 @@ body {
 .tracks-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-left: auto;
+}
+
+.tracks-actions__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tracks-header-actions {
@@ -436,6 +442,30 @@ body {
   position: relative;
 }
 
+.tracks-clear-btn {
+  min-width: 26px;
+  position: relative;
+  font-weight: 700;
+  color: rgba(214, 228, 246, 0.96);
+}
+
+.tracks-clear-btn::after {
+  content: '×';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 25px;
+  font-weight: 10;
+  color: rgba(255, 107, 143, 0.35);
+  text-shadow: 0 0 1px rgba(255, 107, 143, 0.12), 0 0 1px rgba(0, 0, 0, 0.28);
+  -webkit-text-stroke: 0;
+  line-height: 1;
+  opacity: 1;
+  z-index: 2;
+  pointer-events: none;
+}
+
 .tracks-add-menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -466,6 +496,12 @@ body {
 
 .tracks-add-menu__item:hover {
   background: rgba(93, 216, 199, 0.15);
+}
+
+.tracks-add-menu__separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: rgba(138, 165, 197, 0.24);
 }
 
 .label {
@@ -547,12 +583,50 @@ body {
   bottom: -1px;
 }
 
+.track-row.is-drop-inside {
+  border-color: rgba(120, 167, 255, 0.82);
+  background: rgba(120, 167, 255, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(120, 167, 255, 0.24);
+}
+
 .track-row__title {
   display: flex;
   align-items: center;
   gap: 8px;
   font-weight: 600;
   min-width: 0;
+}
+
+.track-row--group-child {
+  margin-left: 14px;
+  width: calc(100% - 14px);
+  min-height: 58px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  padding-left: 10px;
+  padding-right: 72px;
+}
+
+.track-row__child-marker {
+  font-size: 13px;
+  color: rgba(120, 167, 255, 0.92);
+  line-height: 1;
+}
+
+.track-row__group-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 167, 255, 0.34);
+  color: rgba(176, 206, 255, 0.9);
+  background: rgba(120, 167, 255, 0.14);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .track-row__meter {
@@ -596,6 +670,25 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.track-row__name-btn {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  cursor: text;
+}
+
+.track-row__name-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  font-size: 12px;
+  padding: 2px 8px;
 }
 
 .track-row__color {
@@ -648,6 +741,11 @@ body {
   text-overflow: ellipsis;
 }
 
+.track-row__group-summary {
+  font-family: 'IBM Plex Mono', monospace;
+  color: rgba(172, 205, 255, 0.9);
+}
+
 .track-row__osc {
   font-family: 'IBM Plex Mono', monospace;
   color: var(--track-accent);
@@ -672,6 +770,33 @@ body {
 
 .track-row--compact .track-row__meter {
   margin-top: 14px;
+}
+
+.track-row--group-child .track-row__meter {
+  margin-top: 2px;
+}
+
+.track-row--group-child .track-row__name {
+  font-size: 12px;
+}
+
+.track-row--group-child.track-row--compact {
+  min-height: 52px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.track-row--group-child.track-row--compact .track-row__index {
+  display: none;
+}
+
+.track-row--group-child.track-row--compact .track-row__child-marker {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.track-row--group-child.track-row--compact .track-row__name {
+  font-size: 11px;
 }
 
 .track-row__controls {
@@ -713,6 +838,20 @@ body {
   background: rgba(255, 180, 88, 0.34);
   border-color: rgba(255, 180, 88, 0.78);
   color: #fff6e8;
+}
+
+.track-pill--group {
+  width: 32px;
+  border-color: rgba(120, 167, 255, 0.48);
+  background: rgba(120, 167, 255, 0.08);
+  color: rgba(170, 202, 255, 0.95);
+  font-size: 13px;
+}
+
+.track-pill--group.is-active {
+  background: rgba(120, 167, 255, 0.24);
+  border-color: rgba(120, 167, 255, 0.78);
+  color: #ecf4ff;
 }
 
 .timeline {
@@ -941,7 +1080,8 @@ body {
   border: 1px solid rgba(93, 216, 199, 0.52);
   background: rgba(93, 216, 199, 0.2);
   box-shadow: inset 0 0 0 1px rgba(93, 216, 199, 0.12);
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: ew-resize;
 }
 
 .timeline-loop__handle {
@@ -1112,6 +1252,16 @@ body {
   position: relative;
 }
 
+.timeline-track-marquee {
+  position: absolute;
+  border: 1px solid rgba(93, 216, 199, 0.85);
+  background: rgba(93, 216, 199, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(93, 216, 199, 0.2);
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 5;
+}
+
 .track-lane {
   border-radius: 12px;
   border: 1px solid transparent;
@@ -1127,11 +1277,23 @@ body {
   overflow: hidden;
 }
 
+.track-lane--group {
+  overflow: hidden;
+}
+
+.track-lane--group-child {
+  box-shadow: inset 3px 0 0 rgba(120, 167, 255, 0.45);
+}
+
 .track-lane--dmx-color {
   overflow: hidden;
 }
 
 .track-lane--osc-array {
+  overflow: hidden;
+}
+
+.track-lane--osc-3d {
   overflow: hidden;
 }
 
@@ -1185,6 +1347,51 @@ body {
   font-size: 12px;
 }
 
+.group-lane {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.group-lane__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.group-lane__bg {
+  fill: rgba(13, 17, 26, 0.65);
+  stroke: rgba(39, 48, 66, 0.7);
+  stroke-width: 1;
+}
+
+.group-lane__row-line {
+  stroke: rgba(80, 100, 140, 0.4);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.group-lane__audio-clip {
+  fill: rgba(93, 216, 199, 0.16);
+  stroke: rgba(93, 216, 199, 0.42);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.group-lane__label {
+  position: absolute;
+  right: 10px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: rgba(208, 220, 245, 0.85);
+  background: rgba(10, 14, 24, 0.58);
+  border: 1px solid rgba(80, 100, 140, 0.36);
+  pointer-events: none;
+}
+
 .node-editor-wrap {
   width: 100%;
   height: 100%;
@@ -1203,12 +1410,23 @@ body {
   position: relative;
 }
 
+.osc-3d-editor-wrap {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
 .dmx-color-editor {
   width: 100%;
   height: 100%;
 }
 
 .osc-array-editor {
+  width: 100%;
+  height: 100%;
+}
+
+.osc-3d-editor {
   width: 100%;
   height: 100%;
 }
@@ -1310,6 +1528,50 @@ body {
   stroke: transparent;
 }
 
+.osc-3d-editor__bg {
+  fill: rgba(13, 17, 26, 0.65);
+  stroke: rgba(39, 48, 66, 0.7);
+  stroke-width: 1;
+}
+
+.osc-3d-editor__grid {
+  stroke: rgba(39, 48, 66, 0.45);
+  stroke-width: 1;
+}
+
+.osc-3d-editor__line {
+  fill: none;
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.osc-3d-editor__snap {
+  stroke: rgba(93, 216, 199, 0.95);
+  stroke-width: 1.4;
+  stroke-dasharray: 4 3;
+}
+
+.osc-3d-editor__node-rect {
+  stroke-width: 1.3;
+  vector-effect: non-scaling-stroke;
+  cursor: grab;
+}
+
+.osc-3d-editor__node-rect:active {
+  cursor: grabbing;
+}
+
+.osc-3d-editor__node.is-selected .osc-3d-editor__node-rect {
+  stroke: #ffe0b2 !important;
+  stroke-width: 1.6;
+  fill: rgba(255, 180, 88, 0.35) !important;
+}
+
+.osc-3d-editor__hit {
+  fill: transparent;
+  stroke: transparent;
+}
+
 .node-editor {
   width: 100%;
   height: 100%;
@@ -1335,6 +1597,8 @@ body {
   fill: none;
   stroke: var(--track-accent, var(--accent));
   stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
 }
 
 .node-editor__snap {
@@ -1352,6 +1616,8 @@ body {
   fill: #0f1118;
   stroke: var(--track-accent, var(--accent));
   stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
 }
 
 .node-editor__note {
@@ -1359,6 +1625,8 @@ body {
   stroke: var(--track-accent, var(--accent));
   stroke-width: 1.5;
   cursor: grab;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
 }
 
 .node-editor__note-label {
@@ -1394,12 +1662,16 @@ body {
   stroke: rgba(93, 216, 199, 0.86);
   stroke-width: 2.2;
   stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
 }
 
 .node-editor__flag-body {
   fill: rgba(18, 26, 39, 0.92);
   stroke: var(--track-accent, var(--accent));
   stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
 }
 
 .node-editor__flag-text {
@@ -1457,7 +1729,9 @@ body {
   z-index: 30;
   display: flex;
   flex-direction: column;
-  min-width: 120px;
+  min-width: 220px;
+  max-height: min(72vh, 680px);
+  overflow-y: auto;
   padding: 6px;
   border-radius: 10px;
   border: 1px solid var(--stroke);
@@ -1478,6 +1752,12 @@ body {
 
 .node-context-menu__item:hover {
   background: rgba(93, 216, 199, 0.14);
+}
+
+.node-context-menu__separator {
+  height: 1px;
+  margin: 5px 2px;
+  background: rgba(138, 165, 197, 0.22);
 }
 
 .playhead-line {
@@ -1791,12 +2071,13 @@ body {
 .help-shortcuts {
   max-height: min(70vh, 640px);
   overflow: auto;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
 .help-shortcuts__section {
+  flex: 0 0 auto;
   border: 1px solid var(--stroke);
   border-radius: 12px;
   background: rgba(14, 18, 26, 0.7);
@@ -1838,6 +2119,13 @@ body {
 
 .help-shortcuts__section--brand {
   justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+
+.help-shortcuts__section--brand .help-shortcuts__title {
+  width: 100%;
+  text-align: center;
 }
 
 .help-brand {
@@ -1946,8 +2234,174 @@ body {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.field-grid--dual {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .field-grid--quad {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.osc3d-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.osc3d-plane {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.osc3d-plane__title,
+.osc3d-preview__title {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(195, 210, 236, 0.78);
+}
+
+.osc3d-plane__surface,
+.osc3d-preview__stage {
+  position: relative;
+  height: 150px;
+  border-radius: 10px;
+  border: 1px solid rgba(64, 92, 140, 0.55);
+  background: linear-gradient(135deg, rgba(18, 24, 38, 0.92), rgba(10, 14, 22, 0.88));
+  overflow: hidden;
+}
+
+.osc3d-plane__surface {
+  cursor: crosshair;
+}
+
+.osc3d-plane__surface::before,
+.osc3d-plane__surface::after,
+.osc3d-preview__stage::before,
+.osc3d-preview__stage::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.osc3d-plane__surface::before,
+.osc3d-preview__stage::before {
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent 19px,
+      rgba(93, 216, 199, 0.08) 19px,
+      rgba(93, 216, 199, 0.08) 20px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 19px,
+      rgba(93, 216, 199, 0.08) 19px,
+      rgba(93, 216, 199, 0.08) 20px
+    );
+}
+
+.osc3d-plane__axis {
+  position: absolute;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(196, 222, 252, 0.62);
+  pointer-events: none;
+}
+
+.osc3d-plane__axis--horizontal {
+  right: 8px;
+  bottom: 6px;
+}
+
+.osc3d-plane__axis--vertical {
+  left: 6px;
+  top: 6px;
+}
+
+.osc3d-plane__point,
+.osc3d-preview__point {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(93, 216, 199, 0.9);
+  border: 1px solid rgba(8, 12, 18, 0.72);
+  box-shadow: 0 0 0 2px rgba(93, 216, 199, 0.2);
+  pointer-events: none;
+}
+
+.osc3d-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.osc3d-preview--large {
+  grid-column: 1 / -1;
+}
+
+.osc3d-preview__stage--large {
+  height: 250px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.osc3d-preview__stage--large:active {
+  cursor: grabbing;
+}
+
+.osc3d-preview__svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.osc3d-preview__line {
+  stroke: rgba(120, 210, 255, 0.8);
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.osc3d-preview__point-mark {
+  fill: rgba(255, 180, 88, 0.96);
+  stroke: rgba(14, 18, 28, 0.85);
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.osc3d-preview__axis-line {
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.osc3d-preview__axis-label {
+  font-size: 4px;
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: rgba(6, 10, 16, 0.92);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+  dominant-baseline: middle;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+@media (max-width: 1100px) {
+  .osc3d-editor-grid {
+    grid-template-columns: 1fr;
+  }
+  .osc3d-preview--large {
+    grid-column: auto;
+  }
+  .osc3d-preview__stage--large {
+    height: 220px;
+  }
 }
 
 .field__hint {
@@ -2073,10 +2527,6 @@ body {
 
   .midi-monitor {
     width: min(520px, calc(100vw - 32px));
-  }
-
-  .help-shortcuts {
-    grid-template-columns: 1fr;
   }
 
   .track-cue-controls .timeline-controls__label {
