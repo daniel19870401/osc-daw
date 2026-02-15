@@ -13,15 +13,15 @@ try {
 }
 
 const isDev = !app.isPackaged;
-const useDevServer = process.env.OSC_DAW_DEV_SERVER === '1';
-const enableDebugLog = isDev && process.env.OSC_DAW_DEBUG === '1';
+const useDevServer = process.env.OSCONDUCTOR_DEV_SERVER === '1';
+const enableDebugLog = isDev && process.env.OSCONDUCTOR_DEBUG === '1';
 const oscSocket = dgram.createSocket('udp4');
 const artNetSocket = dgram.createSocket('udp4');
 let oscListenPort = null;
 let oscControlSocket = null;
 let oscControlPort = null;
-const APP_MIDI_INPUT_PORT_NAME = 'OSC DAW MIDI IN';
-const APP_MIDI_OUTPUT_PORT_NAME = 'OSC DAW MIDI OUT';
+const APP_MIDI_INPUT_PORT_NAME = 'OSConductor MIDI IN';
+const APP_MIDI_OUTPUT_PORT_NAME = 'OSConductor MIDI OUT';
 let appMidiInputPort = null;
 let appMidiOutputPort = null;
 let oscRecorderWorker = null;
@@ -58,11 +58,37 @@ const encodeOscFloat = (value) => {
   return out;
 };
 
-const buildOscPacket = (address, value) => {
+const encodeOscInt = (value) => {
+  const out = Buffer.alloc(4);
+  out.writeInt32BE(Math.round(Number(value) || 0), 0);
+  return out;
+};
+
+const normalizeOscValueType = (valueType) => (
+  valueType === 'int' ? 'int' : (valueType === 'float' ? 'float' : 'auto')
+);
+
+const buildOscPacket = (address, value, valueType = 'auto') => {
   const safeAddress = typeof address === 'string' && address.startsWith('/') ? address : '/value';
   const addressBuffer = encodeOscString(safeAddress);
-  const typeTagBuffer = encodeOscString(',f');
-  const valueBuffer = encodeOscFloat(value);
+  const mode = normalizeOscValueType(valueType);
+  if (Array.isArray(value)) {
+    const values = value.map((item) => (Number.isFinite(Number(item)) ? Number(item) : 0));
+    const tags = values.map((item) => {
+      if (mode === 'int') return 'i';
+      if (mode === 'float') return 'f';
+      return Number.isInteger(item) ? 'i' : 'f';
+    });
+    const typeTagBuffer = encodeOscString(`,${tags.join('')}`);
+    const valueBuffers = values.map((item, index) => (
+      tags[index] === 'i' ? encodeOscInt(item) : encodeOscFloat(item)
+    ));
+    return Buffer.concat([addressBuffer, typeTagBuffer, ...valueBuffers]);
+  }
+  const scalar = Number.isFinite(Number(value)) ? Number(value) : 0;
+  const useInt = mode === 'int';
+  const typeTagBuffer = encodeOscString(useInt ? ',i' : ',f');
+  const valueBuffer = useInt ? encodeOscInt(scalar) : encodeOscFloat(scalar);
   return Buffer.concat([addressBuffer, typeTagBuffer, valueBuffer]);
 };
 
@@ -342,7 +368,7 @@ const ensureOscRecorderWorker = () => {
 
   worker.on('error', (error) => {
     if (enableDebugLog) {
-      console.error(`[OSC DAW] Recorder worker error: ${error?.message || error}`);
+      console.error(`[OSConductor] Recorder worker error: ${error?.message || error}`);
     }
   });
 
@@ -400,7 +426,7 @@ const closeVirtualMidiPorts = (emitStatus = true) => {
 const openVirtualMidiPorts = () => {
   if (!midi) {
     if (enableDebugLog) {
-      console.warn('[OSC DAW] MIDI library unavailable. Virtual MIDI I/O not created.');
+      console.warn('[OSConductor] MIDI library unavailable. Virtual MIDI I/O not created.');
     }
     emitVirtualMidiStatus({ status: 'unsupported' });
     return;
@@ -427,7 +453,7 @@ const openVirtualMidiPorts = () => {
   } catch (error) {
     appMidiInputPort = null;
     if (enableDebugLog) {
-      console.warn(`[OSC DAW] Failed to open virtual MIDI input: ${error?.message || error}`);
+      console.warn(`[OSConductor] Failed to open virtual MIDI input: ${error?.message || error}`);
     }
   }
 
@@ -438,7 +464,7 @@ const openVirtualMidiPorts = () => {
   } catch (error) {
     appMidiOutputPort = null;
     if (enableDebugLog) {
-      console.warn(`[OSC DAW] Failed to open virtual MIDI output: ${error?.message || error}`);
+      console.warn(`[OSConductor] Failed to open virtual MIDI output: ${error?.message || error}`);
     }
   }
   emitVirtualMidiStatus();
@@ -573,9 +599,9 @@ const resolveAppIcon = () => {
 
 const createWindow = () => {
   const win = new BrowserWindow({
-    width: 1360,
+    width: 1560,
     height: 860,
-    minWidth: 1024,
+    minWidth: 1200,
     minHeight: 640,
     backgroundColor: '#0f1115',
     autoHideMenuBar: true,
@@ -664,7 +690,7 @@ ipcMain.handle('audio:native-cache-file', (_event, payload) => {
     if (!bytes || !bytes.length) {
       return { ok: false, error: 'No file bytes provided' };
     }
-    const tempDir = path.join(app.getPath('temp'), 'oscdaw-native-audio');
+    const tempDir = path.join(app.getPath('temp'), 'osconductor-native-audio');
     fs.mkdirSync(tempDir, { recursive: true });
     const filePath = path.join(
       tempDir,
@@ -680,7 +706,7 @@ ipcMain.handle('osc:send', async (_event, payload) => {
   const host = typeof payload?.host === 'string' && payload.host.trim() ? payload.host.trim() : '127.0.0.1';
   const port = Number(payload?.port);
   const safePort = Number.isFinite(port) ? Math.min(Math.max(Math.round(port), 1), 65535) : 9000;
-  const packet = buildOscPacket(payload?.address, payload?.value);
+  const packet = buildOscPacket(payload?.address, payload?.value, payload?.valueType);
   await new Promise((resolve, reject) => {
     oscSocket.send(packet, safePort, host, (error) => {
       if (error) {

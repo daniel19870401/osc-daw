@@ -1,16 +1,28 @@
 # OSConductor
 
+<p align="left">
+  <img src="docs/assets/osconductor-ui.png" alt="OSConductor UI" width="900" />
+</p>
+
 本程式全部由 AI vibe coding 產出。
 
-Electron + React 的 OSC/Audio/MIDI/DMX 時間軸控制 DAW。
+OSC/Audio/MIDI/DMX 時間軸控制軟體。
 
-## 目前封裝版本（v1.1.3）
+## 所有功能
+
+- 時間軸播放、MTC/LTC 同步、多曲目編排
+- OSC 傳送數值、OSC Array、OSC Flag、OSC Color
+- DMX Color、DMX single value
+- Audio 排列播放
+- MIDI CC、MIDI Note
+
+## 目前封裝版本（v1.2.0）
 
 位於 `release/`：
 
-- `OSCDAW-1.1.3-win-x64.exe`（Windows Intel x64）
-- `OSCDAW-1.1.3-win-arm64.exe`（Windows ARM64）
-- `OSCDAW-1.1.3-arm64-mac.zip`（macOS Apple Silicon）
+- `OSConductor-1.2.0-win-x64.exe`（Windows Intel x64）
+- `OSConductor-1.2.0-win-arm64.exe`（Windows ARM64）
+- `OSConductor-1.2.0-arm64-mac.zip`（macOS Apple Silicon）
 
 ## 開發
 
@@ -52,6 +64,8 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --publish neve
 - `Cmd/Ctrl + Z`：Undo
 - `Cmd/Ctrl + Shift + Z`：Redo
 - `Cmd/Ctrl + Y`：Redo（替代）
+- `Cmd/Ctrl + =`：Timeline Zoom In
+- `Cmd/Ctrl + -`：Timeline Zoom Out
 - `Enter（Audio Channel Map）`：儲存目前 mapping 並跳下一個 Audio Track
 - `↓（Audio Channel Map）`：儲存目前 mapping 並跳下一個 Audio Track
 - `Top Bar: Comps`：顯示 / 隱藏 Composition 面板
@@ -66,7 +80,7 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --publish neve
 - 雙擊 Composition：改名
 - 拖拉 Composition：改順序
 - `Alt/Option + 點擊 Track 的 +`：開啟 Multi Add（一次新增多軌）
-- 雙擊 Node：編輯數值 / 顏色
+- 雙擊 Node：編輯數值 / 顏色（OSC Flag 會編輯 `Time + OSC Address + OSC Value`）
 - 拖拉 Node：改時間與數值
 - `Alt/Option + 拖拉 Node`：吸附到最近 Cue
 - 右鍵 Node：切換曲線模式
@@ -81,6 +95,7 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --publish neve
 - 新專案預設長度：`01:00:00.00`
 - 載入 Audio Clip 不會自動改變 Project Length
 - Audio Clip 在時間軸極小縮放時，Clip 開頭仍會與時間軸對齊
+- 新增 Track 類型：`OSC Flag`（播放軸經過節點時觸發對應 OSC Address/Value）
 
 ### OSC Remote Control
 
@@ -88,21 +103,16 @@ npx electron-builder --mac zip --arm64 --config.mac.identity=null --publish neve
 
 Composition index 為 1-based（依左側 Composition 清單順序）。
 
-- `/OSCDAW/Composition/5/select`：切換到 Composition #5
-- `/OSCDAW/Composition/1/rec 1`：切到 #1 並開啟 REC
-- `/OSCDAW/Composition/1/rec 0`：切到 #1 並關閉 REC
-- `/OSCDAW/Composition/1/play 1`：切到 #1 並播放
-- `/OSCDAW/Composition/1/play 0`：切到 #1 並停止播放
-- `/OSCDAW/Composition/1/stop 1`：切到 #1 並停止＋定位到 `00:00:00.00`
-- `/OSCDAW/Composition/1/cue 10`：切到 #1 並跳到 Cue #10
-- `/OSCDAW/Composition/1/cue/10`：Cue 跳轉替代格式
-
-Legacy（仍支援）：
-
-- `/OSCDAW/rec`
-- `/OSCDAW/play`
-- `/OSCDAW/stop`
-- `/OSCDAW/cue`
+- `/OSConductor/Composition/5/select`：切換到 Composition #5
+- `/OSConductor/Composition/1/rec 1`：切到 #1 並開啟 REC
+- `/OSConductor/Composition/1/rec 0`：切到 #1 並關閉 REC
+- `/OSConductor/Composition/1/play 1`：切到 #1 並播放
+- `/OSConductor/Composition/1/play 0`：切到 #1 並停止播放
+- `/OSConductor/Composition/1/stop 1`：切到 #1 並停止＋定位到 `00:00:00.00`
+- `/OSConductor/Composition/1/loop 1`：切到 #1 並開啟 Loop
+- `/OSConductor/Composition/1/loop 0`：切到 #1 並關閉 Loop
+- `/OSConductor/Composition/1/cue 10`：切到 #1 並跳到 Cue #10
+- `/OSConductor/Composition/1/cue/10`：Cue 跳轉替代格式
 
 ## Brand
 
@@ -117,4 +127,4 @@ Legacy（仍支援）：
 
 如果這個專案對你有幫助，歡迎小額捐款支持：
 
-![OSCDAW Donate QRCode](docs/assets/oscdaw-donate-qrcode.png)
+![OSConductor Donate QRCode](docs/assets/osconductor-donate-qrcode.png)

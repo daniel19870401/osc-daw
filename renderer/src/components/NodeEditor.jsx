@@ -6,6 +6,14 @@ import {
 } from '../utils/timelineMetrics.js';
 
 const CURVE_OPTIONS = ['linear', 'step', 'ease-in', 'ease-out', 'smooth'];
+const MIDI_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+const formatMidiNoteLabel = (value) => {
+  const note = clamp(Math.round(Number(value) || 0), 0, 127);
+  const name = MIDI_NOTE_NAMES[note % 12] || 'C';
+  const octave = Math.floor(note / 12) - 2;
+  return `${name}${octave}`;
+};
 
 export default function NodeEditor({
   track,
@@ -22,6 +30,8 @@ export default function NodeEditor({
   onSelectionChange,
 }) {
   const { nodes, min, max } = track;
+  const isOscFlag = track.kind === 'osc-flag';
+  const isMidiNote = track.kind === 'midi-note';
   const range = max - min || 1;
   const svgRef = useRef(null);
   const dragRef = useRef(null);
@@ -91,6 +101,18 @@ export default function NodeEditor({
     return height - TIMELINE_PADDING - normalized * (height - 2 * TIMELINE_PADDING);
   };
 
+  const normalizedFlagYFromPixel = (pixelY) => {
+    const usableHeight = Math.max(height - TIMELINE_PADDING * 2, 1);
+    return clamp((height - TIMELINE_PADDING - pixelY) / usableHeight, 0, 1);
+  };
+
+  const mapNodeY = (node) => {
+    if (!isOscFlag) return mapValue(node?.v);
+    const raw = Number(node?.y);
+    const yNorm = Number.isFinite(raw) ? clamp(raw, 0, 1) : 0.5;
+    return height - TIMELINE_PADDING - yNorm * (height - 2 * TIMELINE_PADDING);
+  };
+
   const mapTimeToLocalX = (time) => {
     const span = Math.max(view.end - view.start, 0.0001);
     return ((time - view.start) / span) * (contentWidth - 2 * TIMELINE_PADDING) + TIMELINE_PADDING;
@@ -126,6 +148,18 @@ export default function NodeEditor({
   const formatValue = (value) => (
     Number.isInteger(value) ? `${value}` : value.toFixed(2)
   );
+
+  const formatOscFlagBadgeText = (node) => {
+    const fallbackAddress =
+      typeof track.oscAddress === 'string' && track.oscAddress.trim()
+        ? track.oscAddress.trim()
+        : '/osc/flag';
+    const nodeAddress =
+      typeof node?.a === 'string' && node.a.trim()
+        ? node.a.trim()
+        : fallbackAddress;
+    return nodeAddress;
+  };
 
   const displayedNodes = useMemo(() => {
     if (suspendRendering) return [];
@@ -194,6 +228,7 @@ export default function NodeEditor({
   }, [suspendRendering, nodes, view.start, view.end, contentWidth, selectedIds, draggingIds]);
 
   const curvePath = useMemo(() => {
+    if (isMidiNote) return '';
     if (!displayedNodes.length) return '';
     if (displayedNodes.length === 1) {
       const x = mapTimeToLocalX(displayedNodes[0].t);
@@ -239,7 +274,7 @@ export default function NodeEditor({
       }
     }
     return commands.join(' ');
-  }, [displayedNodes, view.start, view.end, min, max, height, contentWidth]);
+  }, [displayedNodes, view.start, view.end, min, max, height, contentWidth, isMidiNote]);
 
   const gridLines = useMemo(
     () => Array.from({ length: 9 }, (_, index) => (
@@ -267,7 +302,7 @@ export default function NodeEditor({
     const selected = nodes
       .filter((node) => {
         const nx = mapTimeToLocalX(node.t);
-        const ny = mapValue(node.v);
+        const ny = mapNodeY(node);
         return nx >= x1 && nx <= x2 && ny >= y1 && ny <= y2;
       })
       .map((node) => node.id);
@@ -302,14 +337,18 @@ export default function NodeEditor({
     activeIds.forEach((id) => {
       const node = nodeMap.get(id);
       if (!node) return;
-      origin[id] = { t: node.t, v: node.v };
+      origin[id] = {
+        t: node.t,
+        v: node.v,
+        y: Number.isFinite(Number(node.y)) ? clamp(Number(node.y), 0, 1) : 0.5,
+      };
     });
 
     dragRef.current = {
       mode: 'nodes',
       start,
       startTime: timeFromX(start.x),
-      startValue: valueFromY(start.y),
+      startValue: isOscFlag ? normalizedFlagYFromPixel(start.y) : valueFromY(start.y),
       activeIds,
       origin,
       moved: false,
@@ -344,7 +383,9 @@ export default function NodeEditor({
 
     if (drag.mode === 'nodes') {
       const deltaT = timeFromX(current.x) - drag.startTime;
-      const deltaV = valueFromY(current.y) - drag.startValue;
+      const deltaV = isOscFlag
+        ? normalizedFlagYFromPixel(current.y) - drag.startValue
+        : valueFromY(current.y) - drag.startValue;
       const snapTimeThreshold =
         ((view.end - view.start) / Math.max(contentWidth - TIMELINE_PADDING * 2, 1)) * 10;
       let nextSnap = null;
@@ -361,14 +402,21 @@ export default function NodeEditor({
               nextSnap = nearestCue;
             }
           }
-          if (event.altKey) {
-            t = clamp(nearestCue.time, 0, view.length ?? view.end);
-          }
+        if (event.altKey) {
+          t = clamp(nearestCue.time, 0, view.length ?? view.end);
         }
-        onNodeDrag(id, {
-          t,
-          v: clamp(base.v + deltaV, min, max),
-        });
+      }
+        if (isOscFlag) {
+          onNodeDrag(id, {
+            t,
+            y: clamp((Number.isFinite(base.y) ? base.y : 0.5) + deltaV, 0, 1),
+          });
+        } else {
+          onNodeDrag(id, {
+            t,
+            v: clamp(base.v + deltaV, min, max),
+          });
+        }
       });
       setSnapGuide(nextSnap ? nextSnap.time : null);
       return;
@@ -405,10 +453,11 @@ export default function NodeEditor({
     event.preventDefault();
     event.stopPropagation();
     setSelectedIds([node.id]);
-    if (onEditNode) onEditNode(node.id, node.v);
+    if (onEditNode) onEditNode(node.id, node.v, isMidiNote ? 'midi-note' : 'value');
   };
 
   const handleNodeContextMenu = (event, nodeId) => {
+    if (isOscFlag || isMidiNote) return;
     event.preventDefault();
     event.stopPropagation();
     if (!selectedSet.has(nodeId)) {
@@ -426,6 +475,25 @@ export default function NodeEditor({
     event.preventDefault();
     event.stopPropagation();
     const { x, y } = getPointerPosition(event);
+    if (isOscFlag) {
+      onAddNode({
+        t: timeFromX(x),
+        v: 1,
+        d: 1,
+        y: normalizedFlagYFromPixel(y),
+        curve: 'linear',
+      });
+      return;
+    }
+    if (isMidiNote) {
+      onAddNode({
+        t: timeFromX(x),
+        v: clamp(Math.round(valueFromY(y)), 0, 127),
+        d: 0.5,
+        curve: 'linear',
+      });
+      return;
+    }
     onAddNode({
       t: timeFromX(x),
       v: valueFromY(y),
@@ -482,7 +550,7 @@ export default function NodeEditor({
           y2={TIMELINE_PADDING}
           className="node-editor__axis"
         />
-        <path d={curvePath} className="node-editor__curve" />
+        {!isOscFlag && !isMidiNote && <path d={curvePath} className="node-editor__curve" />}
         {Number.isFinite(snapGuide) && (
           <line
             x1={mapTimeToLocalX(snapGuide)}
@@ -504,6 +572,11 @@ export default function NodeEditor({
         {displayedNodes.map((node) => {
           const isSelected = selectedSet.has(node.id);
           const isDragging = draggingIds.includes(node.id);
+          const nodeX = mapTimeToLocalX(node.t);
+          const nodeY = mapNodeY(node);
+          const flagText = formatOscFlagBadgeText(node);
+          const flagBodyWidth = clamp(14 + flagText.length * 6.4, 42, 320);
+          const flagTipWidth = 8;
           return (
             <g
               key={node.id}
@@ -514,30 +587,112 @@ export default function NodeEditor({
               onDoubleClick={(event) => handleNodeDoubleClick(event, node)}
               onContextMenu={(event) => handleNodeContextMenu(event, node.id)}
             >
-              <circle
-                data-node-id={node.id}
-                cx={mapTimeToLocalX(node.t)}
-                cy={mapValue(node.v)}
-                r="10"
-                className="node-editor__hit"
-              />
-              <circle
-                data-node-id={node.id}
-                cx={mapTimeToLocalX(node.t)}
-                cy={mapValue(node.v)}
-                r="4.5"
-              />
+              {isOscFlag ? (
+                <g transform={`translate(${nodeX}, ${nodeY})`} data-node-id={node.id}>
+                  <rect
+                    data-node-id={node.id}
+                    x="-8"
+                    y={TIMELINE_PADDING - nodeY}
+                    width={flagBodyWidth + flagTipWidth + 12}
+                    height={Math.max(height - TIMELINE_PADDING * 2, 2)}
+                    className="node-editor__hit"
+                  />
+                  <line
+                    data-node-id={node.id}
+                    x1="0.8"
+                    y1={TIMELINE_PADDING - nodeY}
+                    x2="0.8"
+                    y2={height - TIMELINE_PADDING - nodeY}
+                    className="node-editor__flag-pole"
+                  />
+                  <path
+                    data-node-id={node.id}
+                    d={`M 0 -16 L ${flagBodyWidth} -16 L ${flagBodyWidth + flagTipWidth} -8 L ${flagBodyWidth} 0 L 0 0 Z`}
+                    className="node-editor__flag-body"
+                  />
+                  <text
+                    data-node-id={node.id}
+                    x="6"
+                    y="-8"
+                    textAnchor="start"
+                    dominantBaseline="middle"
+                    className="node-editor__flag-text"
+                  >
+                    {flagText}
+                  </text>
+                </g>
+              ) : isMidiNote ? (
+                <>
+                  {(() => {
+                    const noteDuration = Math.max(Number(node?.d) || 0.5, 0.01);
+                    const noteEnd = clamp(node.t + noteDuration, 0, view.length ?? view.end);
+                    const noteWidth = Math.max(mapTimeToLocalX(noteEnd) - nodeX, 8);
+                    const noteHeight = clamp(height * 0.14, 10, 18);
+                    const noteY = nodeY - noteHeight / 2;
+                    const noteText = `${Math.max(0, Math.min(127, Math.round(Number(node.v) || 0)))} ${formatMidiNoteLabel(node.v)}`;
+                    return (
+                      <>
+                        <rect
+                          data-node-id={node.id}
+                          x={nodeX}
+                          y={noteY}
+                          width={noteWidth}
+                          height={noteHeight}
+                          rx="2"
+                          className="node-editor__note"
+                        />
+                        <rect
+                          data-node-id={node.id}
+                          x={nodeX - 2}
+                          y={noteY - 2}
+                          width={noteWidth + 4}
+                          height={noteHeight + 4}
+                          className="node-editor__hit"
+                        />
+                        {noteWidth > 38 && (
+                          <text
+                            data-node-id={node.id}
+                            x={nodeX + 4}
+                            y={noteY + noteHeight - 3}
+                            className="node-editor__note-label"
+                          >
+                            {noteText}
+                          </text>
+                        )}
+                      </>
+                    );
+                  })()}
+                </>
+              ) : (
+                <>
+                  <circle
+                    data-node-id={node.id}
+                    cx={nodeX}
+                    cy={nodeY}
+                    r="10"
+                    className="node-editor__hit"
+                  />
+                  <circle
+                    data-node-id={node.id}
+                    cx={nodeX}
+                    cy={nodeY}
+                    r="4.5"
+                  />
+                </>
+              )}
             </g>
           );
         })}
-        {displayedNodes.map((node) => {
+        {!isOscFlag && displayedNodes.map((node) => {
           if (!selectedSet.has(node.id) && !draggingIds.includes(node.id)) return null;
-          const label = formatValue(node.v);
+          const label = isMidiNote
+            ? `${Math.max(0, Math.min(127, Math.round(Number(node.v) || 0)))} ${formatMidiNoteLabel(node.v)}`
+            : formatValue(node.v);
           const paddingX = 6;
           const labelWidth = label.length * 7 + paddingX * 2;
           const labelHeight = 18;
           const nodeX = mapTimeToLocalX(node.t);
-          const nodeY = mapValue(node.v);
+          const nodeY = mapNodeY(node);
           let x = nodeX + 8;
           let y = nodeY - labelHeight - 6;
           if (x + labelWidth > contentWidth - TIMELINE_PADDING) {
@@ -552,10 +707,14 @@ export default function NodeEditor({
             </g>
           );
         })}
-        <text x={TIMELINE_PADDING} y={TIMELINE_PADDING - 4} className="node-editor__label">max {max}</text>
-        <text x={TIMELINE_PADDING} y={height - 2} className="node-editor__label">min {min}</text>
+        {!isOscFlag && (
+          <>
+            <text x={TIMELINE_PADDING} y={TIMELINE_PADDING - 4} className="node-editor__label">max {max}</text>
+            <text x={TIMELINE_PADDING} y={height - 2} className="node-editor__label">min {min}</text>
+          </>
+        )}
       </svg>
-      {contextMenu && (
+      {!isOscFlag && !isMidiNote && contextMenu && (
         <div className="node-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
           {CURVE_OPTIONS.map((curve) => (
             <button

@@ -8,8 +8,10 @@ export default function TransportBar({
   currentTime,
   isPlaying,
   isRecording,
+  isLoopEnabled,
   onPlayToggle,
   onRecordToggle,
+  onLoopToggle,
   onStop,
   onStopLocate,
   onOpenSettings,
@@ -25,13 +27,35 @@ export default function TransportBar({
   isInspectorVisible,
   onToggleCompositions,
   onToggleInspector,
+  onTimecodeCommit,
 }) {
   const [isSyncMenuOpen, setIsSyncMenuOpen] = useState(false);
   const [isSyncFpsMenuOpen, setIsSyncFpsMenuOpen] = useState(false);
+  const [timecodeInput, setTimecodeInput] = useState(currentTime || '00:00:00.00');
+  const [isEditingTimecode, setIsEditingTimecode] = useState(false);
   const syncMenuRef = useRef(null);
   const syncFpsMenuRef = useRef(null);
   const selectedSyncFpsLabel =
     syncFpsOptions.find((option) => option.id === syncFps)?.label || syncFps;
+  const safeProjectName = typeof projectName === 'string' ? projectName : '';
+  const displayProjectName = safeProjectName.slice(0, 20);
+
+  useEffect(() => {
+    if (isEditingTimecode) return;
+    setTimecodeInput(currentTime || '00:00:00.00');
+  }, [currentTime, isEditingTimecode]);
+
+  const commitTimecode = () => {
+    if (typeof onTimecodeCommit !== 'function') {
+      setTimecodeInput(currentTime || '00:00:00.00');
+      return;
+    }
+    const next = String(timecodeInput || '').trim();
+    const ok = onTimecodeCommit(next);
+    if (!ok) {
+      setTimecodeInput(currentTime || '00:00:00.00');
+    }
+  };
 
   useEffect(() => {
     if (!isSyncMenuOpen) return undefined;
@@ -56,28 +80,61 @@ export default function TransportBar({
   return (
     <header className="transport">
       <div className="transport__left">
-        <div className="badge">OSC DAW</div>
-        <div className="project-name">{projectName}</div>
+        <div className="project-name" title={safeProjectName}>{displayProjectName}</div>
       </div>
       <div className="transport__center">
         <button
-          className={`btn btn--ghost btn--record ${isRecording ? 'is-active' : ''}`}
+          className={`btn btn--ghost btn--record btn--symbol ${isRecording ? 'is-active' : ''}`}
           onClick={onRecordToggle}
+          title="Record"
         >
-          Rec
-        </button>
-        <button className="btn btn--ghost" onClick={onPlayToggle}>
-          {isPlaying ? 'Pause' : 'Play'}
+          ●
         </button>
         <button
-          className="btn btn--ghost"
+          className={`btn btn--ghost btn--symbol ${isPlaying ? 'is-active' : ''}`}
+          onClick={onPlayToggle}
+          title={isPlaying ? 'Pause' : 'Play'}
+        >
+          ►
+        </button>
+        <button
+          className="btn btn--ghost btn--symbol"
           onClick={onStop}
           onDoubleClick={onStopLocate}
           title="Double-click to return to start"
         >
-          Stop
+          ■
         </button>
-        <div className="transport__time">{currentTime}</div>
+        <button
+          className={`btn btn--ghost btn--symbol ${isLoopEnabled ? 'is-active' : ''}`}
+          onClick={onLoopToggle}
+          title="Loop"
+        >
+          ↺
+        </button>
+        <input
+          className="transport__time"
+          value={timecodeInput}
+          onFocus={() => setIsEditingTimecode(true)}
+          onChange={(event) => setTimecodeInput(event.target.value)}
+          onBlur={() => {
+            setIsEditingTimecode(false);
+            commitTimecode();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              commitTimecode();
+              event.currentTarget.blur();
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              setTimecodeInput(currentTime || '00:00:00.00');
+              event.currentTarget.blur();
+            }
+          }}
+          spellCheck={false}
+          title="Timecode (hh:mm:ss.ff)"
+        />
       </div>
       <div className="transport__right">
         <div className="transport-sync" ref={syncMenuRef}>

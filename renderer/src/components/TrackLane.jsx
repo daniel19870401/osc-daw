@@ -1,6 +1,7 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import NodeEditor from './NodeEditor.jsx';
 import DmxColorEditor from './DmxColorEditor.jsx';
+import OscArrayEditor from './OscArrayEditor.jsx';
 import { TIMELINE_PADDING } from '../utils/timelineMetrics.js';
 
 function TrackLane({
@@ -21,7 +22,8 @@ function TrackLane({
   cues = [],
 }) {
   const isAudio = track.kind === 'audio';
-  const isDmxColor = track.kind === 'dmx-color';
+  const isDmxColor = track.kind === 'dmx-color' || track.kind === 'osc-color';
+  const isOscArray = track.kind === 'osc-array';
   const trackColor = typeof track.color === 'string' ? track.color : '#5dd8c7';
   const laneRef = useRef(null);
   const dragRef = useRef(null);
@@ -187,7 +189,7 @@ function TrackLane({
   return (
     <div
       ref={laneRef}
-      className={`track-lane ${isSelected ? 'is-selected' : ''} ${isAudio ? 'track-lane--audio' : ''} ${isDmxColor ? 'track-lane--dmx-color' : ''}`}
+      className={`track-lane ${isSelected ? 'is-selected' : ''} ${isAudio ? 'track-lane--audio' : ''} ${isDmxColor ? 'track-lane--dmx-color' : ''} ${isOscArray ? 'track-lane--osc-array' : ''}`}
       style={{ height, '--track-accent': trackColor }}
       onClick={() => onSelect(track.id)}
       role="button"
@@ -257,6 +259,20 @@ function TrackLane({
           onEditNode={(nodeId, value, mode, colorHex) => onEditNode(track.id, nodeId, value, mode, colorHex)}
           onSelectionChange={onSelectionChange}
         />
+      ) : isOscArray ? (
+        <OscArrayEditor
+          track={track}
+          view={view}
+          height={height}
+          width={timelineWidth}
+          suspendRendering={suspendRendering}
+          isTrackSelected={isSelected}
+          cues={cues}
+          onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
+          onAddNode={(node) => onAddNode(track.id, node)}
+          onEditNode={(nodeId, value, mode) => onEditNode(track.id, nodeId, value, mode)}
+          onSelectionChange={onSelectionChange}
+        />
       ) : (
         <NodeEditor
           track={track}
@@ -269,7 +285,7 @@ function TrackLane({
           cues={cues}
           onNodeDrag={(nodeId, patch) => onNodeDrag(track.id, nodeId, patch)}
           onAddNode={(node) => onAddNode(track.id, node)}
-          onEditNode={(nodeId, value) => onEditNode(track.id, nodeId, value)}
+          onEditNode={(nodeId, value, mode, colorHex) => onEditNode(track.id, nodeId, value, mode, colorHex)}
           onSelectionChange={onSelectionChange}
         />
       )}

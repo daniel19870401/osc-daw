@@ -5,6 +5,9 @@ const HISTORY_LIMIT = 200;
 const AUDIO_TRACK_MAX_CHANNELS = 64;
 const DEFAULT_PROJECT_LENGTH_SECONDS = 3600;
 const DEFAULT_VIEW_SPAN_SECONDS = 8;
+const MIN_LOOP_SPAN_SECONDS = 0.001;
+const DEFAULT_OSC_OUTPUT_ID = 'osc-out-main';
+const OSC_TRACK_KINDS = new Set(['osc', 'osc-array', 'osc-color', 'osc-flag']);
 const HISTORY_ACTIONS = new Set([
   'update-project',
   'add-composition',
@@ -33,8 +36,16 @@ const HISTORY_ACTIONS = new Set([
 const DEFAULT_OSC_SETTINGS = {
   host: '127.0.0.1',
   port: 9000,
-  listenPort: 9001,
-  controlPort: 9002,
+  outputs: [
+    {
+      id: DEFAULT_OSC_OUTPUT_ID,
+      name: 'Main',
+      host: '127.0.0.1',
+      port: 9000,
+    },
+  ],
+  listenPort: 8999,
+  controlPort: 8998,
 };
 const DEFAULT_AUDIO_SETTINGS = {
   outputDeviceId: 'default',
@@ -54,8 +65,13 @@ const DEFAULT_MIDI_SETTINGS = {
 const DEFAULT_MIDI_TRACK_SETTINGS = {
   outputId: DEFAULT_MIDI_SETTINGS.outputId,
   channel: 1,
-  mode: 'cc',
   controlNumber: 1,
+  mode: 'cc',
+};
+const DEFAULT_MIDI_NOTE_TRACK_SETTINGS = {
+  outputId: DEFAULT_MIDI_SETTINGS.outputId,
+  channel: 1,
+  mode: 'note',
   note: 60,
   velocity: 100,
 };
@@ -82,14 +98,23 @@ const DEFAULT_DMX_COLOR_TRACK_SETTINGS = {
   channelStart: 1,
   fixtureType: 'rgb',
   mappingChannels: 4,
-  gradientFrom: '#ff0000',
-  gradientTo: '#0000ff',
+  gradientFrom: '#000000',
+  gradientTo: '#000000',
   mapping: {
     r: 1,
     g: 2,
     b: 3,
     w: 4,
   },
+};
+const DEFAULT_OSC_COLOR_TRACK_SETTINGS = {
+  fixtureType: 'rgb',
+  outputRange: 'byte',
+  gradientFrom: '#000000',
+  gradientTo: '#000000',
+};
+const DEFAULT_OSC_ARRAY_TRACK_SETTINGS = {
+  valueCount: 5,
 };
 const TRACK_COLORS = [
   '#5dd8c7',
@@ -139,6 +164,48 @@ const normalizePort = (value, fallback) => {
   return clamp(next, 1, 65535);
 };
 
+const createOscOutputId = () => `osc-out-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+
+const normalizeOscOutput = (output, fallback, index) => {
+  const source = output || {};
+  const nameFallback = `Output ${String(index + 1).padStart(2, '0')}`;
+  return {
+    id: typeof source.id === 'string' && source.id.trim()
+      ? source.id.trim()
+      : createOscOutputId(),
+    name: typeof source.name === 'string' && source.name.trim()
+      ? source.name.trim()
+      : nameFallback,
+    host:
+      typeof source.host === 'string' && source.host.trim()
+        ? source.host.trim()
+        : fallback.host,
+    port: normalizePort(source.port, fallback.port),
+  };
+};
+
+const normalizeOscOutputs = (outputs, fallback) => {
+  const raw = Array.isArray(outputs) ? outputs : [];
+  const normalized = raw.map((output, index) => normalizeOscOutput(output, fallback, index));
+  const unique = [];
+  const ids = new Set();
+  normalized.forEach((output, index) => {
+    const safeOutput = { ...output };
+    if (!safeOutput.id || ids.has(safeOutput.id)) {
+      safeOutput.id = index === 0 ? DEFAULT_OSC_OUTPUT_ID : createOscOutputId();
+    }
+    ids.add(safeOutput.id);
+    unique.push(safeOutput);
+  });
+  if (unique.length) return unique;
+  return [{
+    id: DEFAULT_OSC_OUTPUT_ID,
+    name: 'Main',
+    host: fallback.host,
+    port: normalizePort(fallback.port, DEFAULT_OSC_SETTINGS.port),
+  }];
+};
+
 const normalizeOscAddress = (address, fallback = '/osc/input') => {
   if (typeof address !== 'string') return fallback;
   const trimmed = address.trim();
@@ -147,9 +214,36 @@ const normalizeOscAddress = (address, fallback = '/osc/input') => {
   return `/${trimmed}`;
 };
 
+const normalizeOscValueType = (value) => (
+  value === 'int' ? 'int' : 'float'
+);
+
+const isOscTrackKind = (kind) => OSC_TRACK_KINDS.has(kind);
+
 const normalizeDmxFixtureType = (value) => (
   value === 'rgb' || value === 'rgbw' || value === 'mapping' ? value : 'rgb'
 );
+
+const normalizeOscColorFixtureType = (value) => (
+  value === 'rgbw' ? 'rgbw' : 'rgb'
+);
+
+const normalizeOscColorOutputRange = (value) => (
+  value === 'unit' ? 'unit' : 'byte'
+);
+
+const normalizeOscArrayValueCount = (value) => (
+  clamp(Math.round(toFinite(value, DEFAULT_OSC_ARRAY_TRACK_SETTINGS.valueCount)), 1, 20)
+);
+
+const normalizeOscArrayValues = (value, count, fallback, min, max) => {
+  const safeCount = normalizeOscArrayValueCount(count);
+  const raw = Array.isArray(value) ? value : [];
+  const safeFallback = clamp(toFinite(fallback, min), min, max);
+  return Array.from({ length: safeCount }, (_, index) => (
+    clamp(toFinite(raw[index], safeFallback), min, max)
+  ));
+};
 
 const normalizeMappingChannels = (value) => {
   const channels = Math.round(toFinite(value, DEFAULT_DMX_COLOR_TRACK_SETTINGS.mappingChannels));
@@ -192,30 +286,48 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     max,
   };
   if (!next.kind) next.kind = 'osc';
+  if (next.kind === 'midi' && track?.midi?.mode === 'note') {
+    next.kind = 'midi-note';
+  }
   if (!next.id) next.id = `track-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+  next.oscOutputId = isOscTrackKind(next.kind)
+    ? (
+      typeof track.oscOutputId === 'string' && track.oscOutputId.trim()
+        ? track.oscOutputId.trim()
+        : DEFAULT_OSC_OUTPUT_ID
+    )
+    : '';
 
-  if (next.kind === 'midi') {
+  if (next.kind === 'midi' || next.kind === 'midi-note') {
     const midi = track.midi || {};
-    const mode = midi.mode === 'note' ? 'note' : 'cc';
-    next.midi = {
-      outputId:
-        typeof midi.outputId === 'string' && midi.outputId
-          ? midi.outputId
-          : DEFAULT_MIDI_TRACK_SETTINGS.outputId,
-      channel: clamp(Math.round(toFinite(midi.channel, DEFAULT_MIDI_TRACK_SETTINGS.channel)), 1, 16),
-      mode,
-      controlNumber: clamp(
-        Math.round(toFinite(midi.controlNumber, DEFAULT_MIDI_TRACK_SETTINGS.controlNumber)),
-        0,
-        127
-      ),
-      note: clamp(Math.round(toFinite(midi.note, DEFAULT_MIDI_TRACK_SETTINGS.note)), 0, 127),
-      velocity: clamp(Math.round(toFinite(midi.velocity, DEFAULT_MIDI_TRACK_SETTINGS.velocity)), 0, 127),
-    };
-    if (mode === 'note') {
+    if (next.kind === 'midi-note') {
+      next.midi = {
+        outputId:
+          typeof midi.outputId === 'string' && midi.outputId
+            ? midi.outputId
+            : DEFAULT_MIDI_NOTE_TRACK_SETTINGS.outputId,
+        channel: clamp(Math.round(toFinite(midi.channel, DEFAULT_MIDI_NOTE_TRACK_SETTINGS.channel)), 1, 16),
+        mode: 'note',
+        note: clamp(Math.round(toFinite(midi.note, DEFAULT_MIDI_NOTE_TRACK_SETTINGS.note)), 0, 127),
+        velocity: clamp(Math.round(toFinite(midi.velocity, DEFAULT_MIDI_NOTE_TRACK_SETTINGS.velocity)), 0, 127),
+      };
       next.min = 0;
-      next.max = 1;
+      next.max = 127;
+      next.default = clamp(Math.round(toFinite(next.default, 60)), 0, 127);
     } else {
+      next.midi = {
+        outputId:
+          typeof midi.outputId === 'string' && midi.outputId
+            ? midi.outputId
+            : DEFAULT_MIDI_TRACK_SETTINGS.outputId,
+        channel: clamp(Math.round(toFinite(midi.channel, DEFAULT_MIDI_TRACK_SETTINGS.channel)), 1, 16),
+        mode: 'cc',
+        controlNumber: clamp(
+          Math.round(toFinite(midi.controlNumber, DEFAULT_MIDI_TRACK_SETTINGS.controlNumber)),
+          0,
+          127
+        ),
+      };
       next.min = 0;
       next.max = 127;
     }
@@ -271,7 +383,44 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
     next.max = 255;
   }
 
-  if (next.kind !== 'osc') {
+  if (next.kind === 'osc-color') {
+    const oscColor = track.oscColor || {};
+    next.oscColor = {
+      fixtureType: normalizeOscColorFixtureType(oscColor.fixtureType),
+      outputRange: normalizeOscColorOutputRange(oscColor.outputRange),
+      gradientFrom: normalizeTrackColor(
+        oscColor.gradientFrom,
+        DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientFrom
+      ),
+      gradientTo: normalizeTrackColor(
+        oscColor.gradientTo,
+        DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientTo
+      ),
+    };
+    next.min = 0;
+    next.max = 255;
+    next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/color');
+  }
+
+  if (next.kind === 'osc' || next.kind === 'osc-array') {
+    next.oscValueType = normalizeOscValueType(next.oscValueType);
+  } else {
+    next.oscValueType = '';
+  }
+
+  if (next.kind === 'osc-array') {
+    const oscArray = track.oscArray || {};
+    next.oscArray = {
+      valueCount: normalizeOscArrayValueCount(oscArray.valueCount),
+    };
+    next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/array');
+  }
+
+  if (next.kind === 'osc-flag') {
+    next.oscAddress = normalizeOscAddress(next.oscAddress, '/osc/flag');
+  }
+
+  if (next.kind !== 'osc' && next.kind !== 'osc-flag' && next.kind !== 'osc-color' && next.kind !== 'osc-array') {
     next.oscAddress = '';
   }
 
@@ -282,14 +431,45 @@ const normalizeTrack = (track, fallbackColor = '#5dd8c7') => {
         id: node.id ?? createNodeId(),
         ...node,
         t: Math.max(toFinite(node.t, 0), 0),
-        v: clamp(toFinite(node.v, next.default), next.min, next.max),
+        v: next.kind === 'osc-flag'
+          ? toFinite(node.v, 1)
+          : clamp(toFinite(node.v, next.default), next.min, next.max),
         curve: node.curve || 'linear',
       };
+      if (next.kind === 'osc-flag') {
+        normalized.a = normalizeOscAddress(
+          node?.a,
+          normalizeOscAddress(next.oscAddress, '/osc/flag')
+        );
+        normalized.d = Math.max(toFinite(node?.d, 1), 0);
+        normalized.y = clamp(toFinite(node?.y, 0.5), 0, 1);
+      }
       if (next.kind === 'dmx-color') {
         normalized.c = normalizeTrackColor(
           node.c,
           next.dmxColor?.gradientFrom || DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
         );
+      }
+      if (next.kind === 'osc-color') {
+        normalized.c = normalizeTrackColor(
+          node.c,
+          next.oscColor?.gradientFrom || DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientFrom
+        );
+      }
+      if (next.kind === 'osc-array') {
+        const count = normalizeOscArrayValueCount(next.oscArray?.valueCount);
+        normalized.arr = normalizeOscArrayValues(
+          node.arr,
+          count,
+          normalized.v,
+          next.min,
+          next.max
+        );
+        normalized.v = normalized.arr[0] ?? normalized.v;
+      }
+      if (next.kind === 'midi-note') {
+        normalized.v = clamp(Math.round(toFinite(node?.v, next.default)), 0, 127);
+        normalized.d = Math.max(toFinite(node?.d, 0.5), 0.01);
       }
       return normalized;
     })
@@ -334,12 +514,23 @@ const normalizeView = (view) => {
     end = length;
     start = Math.max(end - safeSpan, 0);
   }
+  let loopStart = clamp(toFinite(view.loopStart, start), 0, length);
+  let loopEnd = clamp(toFinite(view.loopEnd, end), 0, length);
+  if (loopEnd - loopStart < MIN_LOOP_SPAN_SECONDS) {
+    loopEnd = clamp(loopStart + MIN_LOOP_SPAN_SECONDS, 0, length);
+    if (loopEnd - loopStart < MIN_LOOP_SPAN_SECONDS) {
+      loopStart = clamp(loopEnd - MIN_LOOP_SPAN_SECONDS, 0, length);
+    }
+  }
   return {
     ...view,
     trackHeight: clamp(toFinite(view.trackHeight, 96), 64, 640),
     length,
     start,
     end,
+    loopEnabled: Boolean(view.loopEnabled),
+    loopStart,
+    loopEnd,
   };
 };
 
@@ -350,10 +541,34 @@ const normalizeCues = (cues, length) => (Array.isArray(cues) ? cues : [])
   }))
   .sort((a, b) => a.t - b.t);
 
-const normalizeTracks = (tracks) => (Array.isArray(tracks) ? tracks : [])
-  .map((track, index) => normalizeTrack(track, pickTrackColor(index + 1)));
+const normalizeTracks = (tracks, oscOutputIds = new Set([DEFAULT_OSC_OUTPUT_ID]), fallbackOscOutputId = DEFAULT_OSC_OUTPUT_ID) => {
+  const safeOutputIds = oscOutputIds instanceof Set ? oscOutputIds : new Set([fallbackOscOutputId]);
+  const safeFallback = safeOutputIds.has(fallbackOscOutputId)
+    ? fallbackOscOutputId
+    : (safeOutputIds.values().next().value || DEFAULT_OSC_OUTPUT_ID);
+  return (Array.isArray(tracks) ? tracks : [])
+    .map((track, index) => {
+      const normalized = normalizeTrack(track, pickTrackColor(index + 1));
+      if (isOscTrackKind(normalized.kind)) {
+        const currentOutputId =
+          typeof normalized.oscOutputId === 'string' && normalized.oscOutputId
+            ? normalized.oscOutputId
+            : safeFallback;
+        normalized.oscOutputId = safeOutputIds.has(currentOutputId) ? currentOutputId : safeFallback;
+      } else {
+        normalized.oscOutputId = '';
+      }
+      return normalized;
+    });
+};
 
-const normalizeComposition = (composition, index, fallbackView) => {
+const normalizeComposition = (
+  composition,
+  index,
+  fallbackView,
+  oscOutputIds = new Set([DEFAULT_OSC_OUTPUT_ID]),
+  fallbackOscOutputId = DEFAULT_OSC_OUTPUT_ID
+) => {
   const view = normalizeView(composition?.view || fallbackView);
   return {
     id:
@@ -366,8 +581,26 @@ const normalizeComposition = (composition, index, fallbackView) => {
         : `Composition ${String(index).padStart(2, '0')}`,
     view,
     cues: normalizeCues(composition?.cues, view.length),
-    tracks: normalizeTracks(composition?.tracks),
+    tracks: normalizeTracks(composition?.tracks, oscOutputIds, fallbackOscOutputId),
   };
+};
+
+const getOscOutputsFromProject = (project) => normalizeOscOutputs(project?.osc?.outputs, {
+  host:
+    typeof project?.osc?.host === 'string' && project.osc.host.trim()
+      ? project.osc.host.trim()
+      : DEFAULT_OSC_SETTINGS.host,
+  port: normalizePort(project?.osc?.port, DEFAULT_OSC_SETTINGS.port),
+});
+
+const getDefaultOscOutputIdFromProject = (project) => {
+  const outputs = getOscOutputsFromProject(project);
+  return outputs[0]?.id || DEFAULT_OSC_OUTPUT_ID;
+};
+
+const getOscOutputIdSetFromProject = (project) => {
+  const outputs = getOscOutputsFromProject(project);
+  return new Set(outputs.map((output) => output.id));
 };
 
 const syncActiveCompositionInProject = (project) => {
@@ -377,9 +610,12 @@ const syncActiveCompositionInProject = (project) => {
     typeof project.activeCompositionId === 'string' && project.activeCompositionId
       ? project.activeCompositionId
       : compositions[0].id;
+  const oscOutputs = getOscOutputsFromProject(project);
+  const oscOutputIds = new Set(oscOutputs.map((output) => output.id));
+  const defaultOscOutputId = oscOutputs[0]?.id || DEFAULT_OSC_OUTPUT_ID;
   const view = normalizeView(project.view || compositions[0].view);
   const cues = normalizeCues(project.cues, view.length);
-  const tracks = normalizeTracks(project.tracks);
+  const tracks = normalizeTracks(project.tracks, oscOutputIds, defaultOscOutputId);
   const nextCompositions = compositions.map((composition) => (
     composition.id !== activeId
       ? composition
@@ -403,7 +639,21 @@ const normalizeProject = (project) => {
     trackHeight: 96,
   });
   const fallbackCues = normalizeCues(project.cues, fallbackView.length);
-  const fallbackTracks = normalizeTracks(project.tracks);
+  const legacyOscFallback = {
+    host:
+      typeof project.osc?.host === 'string' && project.osc.host.trim()
+        ? project.osc.host.trim()
+        : DEFAULT_OSC_SETTINGS.host,
+    port: normalizePort(project.osc?.port, DEFAULT_OSC_SETTINGS.port),
+  };
+  const oscOutputs = normalizeOscOutputs(project.osc?.outputs, legacyOscFallback);
+  const defaultOscOutput = oscOutputs[0] || {
+    id: DEFAULT_OSC_OUTPUT_ID,
+    host: DEFAULT_OSC_SETTINGS.host,
+    port: DEFAULT_OSC_SETTINGS.port,
+  };
+  const oscOutputIds = new Set(oscOutputs.map((output) => output.id));
+  const fallbackTracks = normalizeTracks(project.tracks, oscOutputIds, defaultOscOutput.id);
   const audio = {
     outputDeviceId:
       typeof project.audio?.outputDeviceId === 'string' && project.audio.outputDeviceId
@@ -424,11 +674,9 @@ const normalizeProject = (project) => {
     },
   };
   const osc = {
-    host:
-      typeof project.osc?.host === 'string' && project.osc.host.trim()
-        ? project.osc.host.trim()
-        : DEFAULT_OSC_SETTINGS.host,
-    port: normalizePort(project.osc?.port, DEFAULT_OSC_SETTINGS.port),
+    host: defaultOscOutput.host,
+    port: normalizePort(defaultOscOutput.port, DEFAULT_OSC_SETTINGS.port),
+    outputs: oscOutputs,
     listenPort: normalizePort(project.osc?.listenPort, DEFAULT_OSC_SETTINGS.listenPort),
     controlPort: normalizePort(project.osc?.controlPort, DEFAULT_OSC_SETTINGS.controlPort),
   };
@@ -455,7 +703,13 @@ const normalizeProject = (project) => {
       tracks: fallbackTracks,
     }];
   const compositions = sourceCompositions
-    .map((composition, index) => normalizeComposition(composition, index + 1, fallbackView));
+    .map((composition, index) => normalizeComposition(
+      composition,
+      index + 1,
+      fallbackView,
+      oscOutputIds,
+      defaultOscOutput.id
+    ));
   const activeCompositionId =
     typeof project.activeCompositionId === 'string'
     && compositions.some((composition) => composition.id === project.activeCompositionId)
@@ -494,15 +748,35 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
     kind === 'audio'
       ? `Audio ${String(index).padStart(2, '0')}`
       : kind === 'midi'
-        ? `MIDI ${String(index).padStart(2, '0')}`
+        ? `MIDI CC ${String(index).padStart(2, '0')}`
+      : kind === 'midi-note'
+        ? `MIDI Note ${String(index).padStart(2, '0')}`
+      : kind === 'osc-array'
+        ? `OSC Array ${String(index).padStart(2, '0')}`
+      : kind === 'osc-color'
+          ? `OSC Color ${String(index).padStart(2, '0')}`
+        : kind === 'osc-flag'
+          ? `OSC Flag ${String(index).padStart(2, '0')}`
         : kind === 'dmx-color'
           ? `DMX Color ${String(index).padStart(2, '0')}`
         : kind === 'dmx'
           ? `DMX ${String(index).padStart(2, '0')}`
         : `Track ${String(index).padStart(2, '0')}`;
-  const min = kind === 'midi' || kind === 'dmx' || kind === 'dmx-color' ? 0 : 0;
-  const max = kind === 'midi' ? 127 : ((kind === 'dmx' || kind === 'dmx-color') ? 255 : 1);
-  const def = kind === 'audio' ? 1 : (kind === 'midi' || kind === 'dmx' || kind === 'dmx-color' ? 0 : 0.5);
+  const min = kind === 'midi' || kind === 'midi-note' || kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color' ? 0 : 0;
+  const max = kind === 'midi' || kind === 'midi-note'
+    ? 127
+    : ((kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color') ? 255 : 1);
+  const def = kind === 'audio'
+    ? 1
+    : (
+      kind === 'midi' || kind === 'dmx' || kind === 'dmx-color' || kind === 'osc-color'
+        ? 0
+        : (
+          kind === 'midi-note'
+            ? 60
+            : (kind === 'osc-flag' ? 1 : (kind === 'osc-array' ? 0 : 0.5))
+        )
+    );
   const base = {
     id,
     name,
@@ -513,7 +787,22 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
     min,
     max,
     default: def,
-    oscAddress: kind === 'osc' ? `/track/${index}/value` : '',
+    oscOutputId: isOscTrackKind(kind)
+      ? (
+        typeof options.oscOutputId === 'string' && options.oscOutputId.trim()
+          ? options.oscOutputId.trim()
+          : DEFAULT_OSC_OUTPUT_ID
+      )
+      : '',
+    oscValueType: kind === 'osc' || kind === 'osc-array' ? 'float' : '',
+    oscAddress:
+      kind === 'osc'
+        ? `/track/${index}/value`
+        : (kind === 'osc-array'
+          ? `/track/${index}/send`
+        : (kind === 'osc-color'
+          ? `/track/${index}/color`
+          : (kind === 'osc-flag' ? `/track/${index}/flag` : ''))),
     nodes: [],
   };
   if (kind === 'audio') {
@@ -539,15 +828,34 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
           1,
           16
         ),
-        mode: midiOptions.mode === 'note' ? 'note' : 'cc',
+        mode: 'cc',
         controlNumber: clamp(
           Math.round(toFinite(midiOptions.controlNumber, DEFAULT_MIDI_TRACK_SETTINGS.controlNumber)),
           0,
           127
         ),
-        note: clamp(Math.round(toFinite(midiOptions.note, DEFAULT_MIDI_TRACK_SETTINGS.note)), 0, 127),
+      },
+    };
+  }
+  if (kind === 'midi-note') {
+    const midiOptions = options.midi || {};
+    return {
+      ...base,
+      midi: {
+        ...DEFAULT_MIDI_NOTE_TRACK_SETTINGS,
+        outputId:
+          typeof midiOptions.outputId === 'string' && midiOptions.outputId
+            ? midiOptions.outputId
+            : DEFAULT_MIDI_NOTE_TRACK_SETTINGS.outputId,
+        channel: clamp(
+          Math.round(toFinite(midiOptions.channel, DEFAULT_MIDI_NOTE_TRACK_SETTINGS.channel)),
+          1,
+          16
+        ),
+        mode: 'note',
+        note: clamp(Math.round(toFinite(midiOptions.note, DEFAULT_MIDI_NOTE_TRACK_SETTINGS.note)), 0, 127),
         velocity: clamp(
-          Math.round(toFinite(midiOptions.velocity, DEFAULT_MIDI_TRACK_SETTINGS.velocity)),
+          Math.round(toFinite(midiOptions.velocity, DEFAULT_MIDI_NOTE_TRACK_SETTINGS.velocity)),
           0,
           127
         ),
@@ -573,6 +881,88 @@ const createTrack = (index, view, kind = 'osc', options = {}) => {
           1,
           512
         ),
+      },
+    };
+  }
+  if (kind === 'osc-color') {
+    const oscColorOptions = options.oscColor || {};
+    const safeLength = Math.max(Number(view?.length) || 0, 1);
+    return {
+      ...base,
+      nodes: [
+        {
+          id: createNodeId(),
+          t: 0,
+          v: 0,
+          c: normalizeTrackColor(
+            oscColorOptions.gradientFrom,
+            DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientFrom
+          ),
+          curve: 'linear',
+        },
+        {
+          id: createNodeId(),
+          t: safeLength,
+          v: 255,
+          c: normalizeTrackColor(
+            oscColorOptions.gradientTo,
+            DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientTo
+          ),
+          curve: 'linear',
+        },
+      ],
+      oscColor: {
+        fixtureType: normalizeOscColorFixtureType(oscColorOptions.fixtureType),
+        outputRange: normalizeOscColorOutputRange(oscColorOptions.outputRange),
+        gradientFrom: normalizeTrackColor(
+          oscColorOptions.gradientFrom,
+          DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientFrom
+        ),
+        gradientTo: normalizeTrackColor(
+          oscColorOptions.gradientTo,
+          DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientTo
+        ),
+      },
+    };
+  }
+  if (kind === 'osc-array') {
+    const oscArrayOptions = options.oscArray || {};
+    const safeLength = Math.max(Number(view?.length) || 0, 1);
+    const valueCount = normalizeOscArrayValueCount(oscArrayOptions.valueCount);
+    const startValues = normalizeOscArrayValues(
+      oscArrayOptions.startValues,
+      valueCount,
+      def,
+      min,
+      max
+    );
+    const endValues = normalizeOscArrayValues(
+      oscArrayOptions.endValues,
+      valueCount,
+      def,
+      min,
+      max
+    );
+    return {
+      ...base,
+      nodes: [
+        {
+          id: createNodeId(),
+          t: 0,
+          v: startValues[0] ?? def,
+          arr: startValues,
+          curve: 'linear',
+        },
+        {
+          id: createNodeId(),
+          t: safeLength,
+          v: endValues[0] ?? def,
+          arr: endValues,
+          curve: 'linear',
+        },
+      ],
+      oscArray: {
+        valueCount,
       },
     };
   }
@@ -666,6 +1056,9 @@ export const createInitialState = () => {
       end: DEFAULT_VIEW_SPAN_SECONDS,
       length: DEFAULT_PROJECT_LENGTH_SECONDS,
       trackHeight: 96,
+      loopEnabled: false,
+      loopStart: 0,
+      loopEnd: DEFAULT_VIEW_SPAN_SECONDS,
     },
     cues: [],
     tracks: [],
@@ -736,6 +1129,7 @@ const ingestOscSamples = (state, sampleList) => {
   const addressToIndex = new Map();
   const touchedIndexes = new Set();
   let changed = false;
+  const defaultOscOutputId = getDefaultOscOutputIdFromProject(state.project);
 
   tracks.forEach((track, index) => {
     if (track.kind !== 'osc') return;
@@ -762,7 +1156,9 @@ const ingestOscSamples = (state, sampleList) => {
     const min = Math.floor(Math.min(0, rawValue));
     const max = Math.ceil(Math.max(1, rawValue));
     const safeMax = min === max ? min + 1 : max;
-    const baseTrack = createTrack(index, state.project.view, 'osc');
+    const baseTrack = createTrack(index, state.project.view, 'osc', {
+      oscOutputId: defaultOscOutputId,
+    });
     const nextTrack = normalizeTrack({
       ...baseTrack,
       name: buildAutoTrackName(address, index),
@@ -915,6 +1311,9 @@ const reduceProjectState = (state, action) => {
         end: Math.min(DEFAULT_VIEW_SPAN_SECONDS, sourceView.length),
         length: sourceView.length,
         trackHeight: sourceView.trackHeight,
+        loopEnabled: false,
+        loopStart: 0,
+        loopEnd: Math.min(DEFAULT_VIEW_SPAN_SECONDS, sourceView.length),
       });
       const nextIndex = (syncedProject.compositions?.length || 0) + 1;
       const composition = {
@@ -1063,8 +1462,15 @@ const reduceProjectState = (state, action) => {
     }
     case 'add-track': {
       const index = state.project.tracks.length + 1;
+      const defaultOscOutputId = getDefaultOscOutputIdFromProject(state.project);
       const track = normalizeTrack(
-        createTrack(index, state.project.view, action.kind || 'osc', action.options || {}),
+        createTrack(index, state.project.view, action.kind || 'osc', {
+          ...(action.options || {}),
+          oscOutputId:
+            typeof action.options?.oscOutputId === 'string' && action.options.oscOutputId
+              ? action.options.oscOutputId
+              : defaultOscOutputId,
+        }),
         pickTrackColor(index)
       );
       return {
@@ -1080,11 +1486,18 @@ const reduceProjectState = (state, action) => {
       const items = Array.isArray(action.items) ? action.items : [];
       if (!items.length) return state;
       const startIndex = state.project.tracks.length + 1;
+      const defaultOscOutputId = getDefaultOscOutputIdFromProject(state.project);
       const addedTracks = items.map((item, offset) => {
         const index = startIndex + offset;
         const kind = item?.kind || 'osc';
         return normalizeTrack(
-          createTrack(index, state.project.view, kind, item?.options || {}),
+          createTrack(index, state.project.view, kind, {
+            ...(item?.options || {}),
+            oscOutputId:
+              typeof item?.options?.oscOutputId === 'string' && item.options.oscOutputId
+                ? item.options.oscOutputId
+                : defaultOscOutputId,
+          }),
           pickTrackColor(index)
         );
       });
@@ -1101,6 +1514,8 @@ const reduceProjectState = (state, action) => {
     case 'paste-tracks': {
       const sourceTracks = Array.isArray(action.tracks) ? action.tracks.filter(Boolean) : [];
       if (!sourceTracks.length) return state;
+      const oscOutputIds = getOscOutputIdSetFromProject(state.project);
+      const defaultOscOutputId = getDefaultOscOutputIdFromProject(state.project);
       const existingTracks = [...state.project.tracks];
       let insertIndex = existingTracks.length;
       if (action.insertAfterId) {
@@ -1112,12 +1527,20 @@ const reduceProjectState = (state, action) => {
         const copiedNodes = Array.isArray(source.nodes)
           ? source.nodes.map((node) => ({ ...node, id: undefined }))
           : [];
-        return normalizeTrack({
+        const normalized = normalizeTrack({
           ...source,
           id: undefined,
           name: `${baseName} Copy`,
           nodes: copiedNodes,
         }, pickTrackColor(insertIndex + offset + 1));
+        if (isOscTrackKind(normalized.kind)) {
+          const outputId =
+            typeof normalized.oscOutputId === 'string' && normalized.oscOutputId
+              ? normalized.oscOutputId
+              : defaultOscOutputId;
+          normalized.oscOutputId = oscOutputIds.has(outputId) ? outputId : defaultOscOutputId;
+        }
+        return normalized;
       });
       const tracks = [...existingTracks];
       tracks.splice(insertIndex, 0, ...addedTracks);
@@ -1173,12 +1596,22 @@ const reduceProjectState = (state, action) => {
       const tracks = state.project.tracks.map((track) => {
         if (track.id !== action.id) return track;
         const dmxColorPatch = action.patch.dmxColor || {};
+        const oscColorPatch = action.patch.oscColor || {};
+        const oscArrayPatch = action.patch.oscArray || {};
         return normalizeTrack({
           ...track,
           ...action.patch,
           audio: { ...track.audio, ...action.patch.audio },
           midi: { ...track.midi, ...action.patch.midi },
           dmx: { ...track.dmx, ...action.patch.dmx },
+          oscArray: {
+            ...track.oscArray,
+            ...oscArrayPatch,
+          },
+          oscColor: {
+            ...track.oscColor,
+            ...oscColorPatch,
+          },
           dmxColor: {
             ...track.dmxColor,
             ...dmxColorPatch,
@@ -1250,13 +1683,45 @@ const reduceProjectState = (state, action) => {
           id: createNodeId(),
           curve: 'linear',
           ...action.node,
-          v: clamp(action.node.v, track.min, track.max),
+          v: track.kind === 'osc-flag'
+            ? toFinite(action.node?.v, 1)
+            : track.kind === 'midi-note'
+              ? clamp(Math.round(toFinite(action.node?.v, track.default)), 0, 127)
+            : clamp(action.node.v, track.min, track.max),
         };
+        if (track.kind === 'osc-flag') {
+          node.a = normalizeOscAddress(
+            action.node?.a,
+            normalizeOscAddress(track.oscAddress, '/osc/flag')
+          );
+          node.d = Math.max(toFinite(action.node?.d, 1), 0);
+          node.y = clamp(toFinite(action.node?.y, 0.5), 0, 1);
+        }
         if (track.kind === 'dmx-color') {
           node.c = normalizeTrackColor(
             action.node?.c,
             track.dmxColor?.gradientFrom || DEFAULT_DMX_COLOR_TRACK_SETTINGS.gradientFrom
           );
+        }
+        if (track.kind === 'osc-color') {
+          node.c = normalizeTrackColor(
+            action.node?.c,
+            track.oscColor?.gradientFrom || DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientFrom
+          );
+        }
+        if (track.kind === 'osc-array') {
+          const count = normalizeOscArrayValueCount(track.oscArray?.valueCount);
+          node.arr = normalizeOscArrayValues(
+            action.node?.arr,
+            count,
+            node.v,
+            track.min,
+            track.max
+          );
+          node.v = node.arr[0] ?? node.v;
+        }
+        if (track.kind === 'midi-note') {
+          node.d = Math.max(toFinite(action.node?.d, 0.5), 0.01);
         }
         return normalizeTrack({
           ...track,
@@ -1277,7 +1742,21 @@ const reduceProjectState = (state, action) => {
           id: createNodeId(),
           curve: node?.curve || 'linear',
           t: Math.max(toFinite(node?.t, 0), 0),
-          v: clamp(toFinite(node?.v, track.default), track.min, track.max),
+          v: track.kind === 'osc-flag'
+            ? toFinite(node?.v, 1)
+            : track.kind === 'midi-note'
+              ? clamp(Math.round(toFinite(node?.v, track.default)), 0, 127)
+            : clamp(toFinite(node?.v, track.default), track.min, track.max),
+          ...(track.kind === 'osc-flag'
+            ? {
+              a: normalizeOscAddress(
+                node?.a,
+                normalizeOscAddress(track.oscAddress, '/osc/flag')
+              ),
+              d: Math.max(toFinite(node?.d, 1), 0),
+              y: clamp(toFinite(node?.y, 0.5), 0, 1),
+            }
+            : {}),
           ...(track.kind === 'dmx-color'
             ? {
               c: normalizeTrackColor(
@@ -1286,7 +1765,35 @@ const reduceProjectState = (state, action) => {
               ),
             }
             : {}),
+          ...(track.kind === 'osc-color'
+            ? {
+              c: normalizeTrackColor(
+                node?.c,
+                track.oscColor?.gradientFrom || DEFAULT_OSC_COLOR_TRACK_SETTINGS.gradientFrom
+              ),
+            }
+            : {}),
+          ...(track.kind === 'osc-array'
+            ? {
+              arr: normalizeOscArrayValues(
+                node?.arr,
+                normalizeOscArrayValueCount(track.oscArray?.valueCount),
+                toFinite(node?.v, track.default),
+                track.min,
+                track.max
+              ),
+            }
+            : {}),
+          ...(track.kind === 'midi-note'
+            ? {
+              d: Math.max(toFinite(node?.d, 0.5), 0.01),
+            }
+            : {}),
         }));
+        nodes.forEach((node) => {
+          if (!Array.isArray(node.arr)) return;
+          node.v = Number.isFinite(node.arr[0]) ? node.arr[0] : node.v;
+        });
         return normalizeTrack({
           ...track,
           nodes: [...track.nodes, ...nodes],

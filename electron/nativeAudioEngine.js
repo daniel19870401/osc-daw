@@ -302,7 +302,7 @@ class NativeAudioEngine {
         audify.RtAudioFormat.RTAUDIO_SINT16,
         this.sampleRate,
         this.bufferFrames,
-        'OSCDAW-Native',
+        'OSConductor-Native',
         null,
         () => {
           if (!this.playing || !this.streamRunning) return;

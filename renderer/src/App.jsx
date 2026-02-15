@@ -27,14 +27,15 @@ const SYNC_FPS_OPTIONS = [
 const DEFAULT_SYNC_FPS_ID = '30';
 const VIRTUAL_MIDI_INPUT_ID = 'virtual-midi-in';
 const VIRTUAL_MIDI_OUTPUT_ID = 'virtual-midi-out';
-const APP_MIDI_INPUT_PORT_NAME = 'OSC DAW MIDI IN';
-const APP_MIDI_OUTPUT_PORT_NAME = 'OSC DAW MIDI OUT';
+const APP_MIDI_INPUT_PORT_NAME = 'OSConductor MIDI IN';
+const APP_MIDI_OUTPUT_PORT_NAME = 'OSConductor MIDI OUT';
 const VIRTUAL_MIDI_INPUT_NAME = APP_MIDI_INPUT_PORT_NAME;
 const VIRTUAL_MIDI_OUTPUT_NAME = APP_MIDI_OUTPUT_PORT_NAME;
 const DEV_SERVER_PORT = 5170;
 const ARTNET_PORT = 6454;
 const MAX_AUDIO_CHANNELS = 64;
 const MAX_WEB_AUDIO_OUTPUT_CHANNELS = 32;
+const DEFAULT_OSC_OUTPUT_ID = 'osc-out-main';
 const COPYRIGHT_YEAR = new Date().getFullYear();
 
 const resolveSyncFps = (syncFpsId) => {
@@ -100,6 +101,35 @@ const formatHmsfTimecode = (seconds, fps) => {
   return `${pad(hours)}:${pad(minutes)}:${pad(secs)}.${pad(frames)}`;
 };
 
+const parseHmsfTimecode = (value, fps) => {
+  const input = typeof value === 'string' ? value.trim() : '';
+  if (!input) return null;
+  const match = /^(\d+):([0-5]?\d):([0-5]?\d)(?:[.:](\d{1,2}))?$/.exec(input);
+  if (!match) return null;
+  const frameBase = toFrameBase(fps);
+  const hours = Math.max(Number(match[1]) || 0, 0);
+  const minutes = clamp(Number(match[2]) || 0, 0, 59);
+  const seconds = clamp(Number(match[3]) || 0, 0, 59);
+  const frames = clamp(Number(match[4] ?? 0) || 0, 0, frameBase - 1);
+  return hmsfPartsToSeconds(hours, minutes, seconds, frames, fps);
+};
+
+const MIDI_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+const formatMidiNoteLabel = (value) => {
+  const note = clamp(Math.round(Number(value) || 0), 0, 127);
+  const name = MIDI_NOTE_NAMES[note % 12] || 'C';
+  const octave = Math.floor(note / 12) - 2;
+  return `${name}${octave}`;
+};
+
+const normalizeOscAddressPath = (value, fallback = '/osc/value') => {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return fallback;
+  if (raw.startsWith('/')) return raw;
+  return `/${raw}`;
+};
+
 const HEX_COLOR_RE = /^#([0-9a-f]{6})$/i;
 
 const clampByte = (value) => clamp(Math.round(Number(value) || 0), 0, 255);
@@ -160,30 +190,37 @@ const rgbToRgbw = (rgb) => {
   };
 };
 
-const dmxColorNodeHex = (track, node) => {
-  if (!track || track.kind !== 'dmx-color') return '#000000';
-  if (node && typeof node.c === 'string' && HEX_COLOR_RE.test(node.c)) return node.c.toLowerCase();
-  return dmxColorValueToHex(track, node?.v ?? track.default);
+const getColorTrackConfig = (track) => {
+  if (!track) return null;
+  if (track.kind === 'dmx-color') return track.dmxColor || {};
+  if (track.kind === 'osc-color') return track.oscColor || {};
+  return null;
 };
 
-const sampleDmxColorHexAtTime = (track, time) => {
-  if (!track || track.kind !== 'dmx-color') return '#000000';
+const colorTrackNodeHex = (track, node) => {
+  if (!track || (track.kind !== 'dmx-color' && track.kind !== 'osc-color')) return '#000000';
+  if (node && typeof node.c === 'string' && HEX_COLOR_RE.test(node.c)) return node.c.toLowerCase();
+  return colorTrackValueToHex(track, node?.v ?? track.default);
+};
+
+const sampleColorTrackHexAtTime = (track, time) => {
+  if (!track || (track.kind !== 'dmx-color' && track.kind !== 'osc-color')) return '#000000';
   const nodes = Array.isArray(track.nodes) ? track.nodes : [];
-  if (!nodes.length) return dmxColorValueToHex(track, track.default);
+  if (!nodes.length) return colorTrackValueToHex(track, track.default);
   const sorted = [...nodes].sort((a, b) => a.t - b.t);
-  if (time <= sorted[0].t) return dmxColorNodeHex(track, sorted[0]);
-  if (time >= sorted[sorted.length - 1].t) return dmxColorNodeHex(track, sorted[sorted.length - 1]);
+  if (time <= sorted[0].t) return colorTrackNodeHex(track, sorted[0]);
+  if (time >= sorted[sorted.length - 1].t) return colorTrackNodeHex(track, sorted[sorted.length - 1]);
   for (let i = 0; i < sorted.length - 1; i += 1) {
     const a = sorted[i];
     const b = sorted[i + 1];
     if (time < a.t || time > b.t) continue;
-    if (Math.abs(b.t - a.t) < 1e-9) return dmxColorNodeHex(track, b);
+    if (Math.abs(b.t - a.t) < 1e-9) return colorTrackNodeHex(track, b);
     const ratio = clamp((time - a.t) / (b.t - a.t), 0, 1);
-    const aRgb = parseHexColor(dmxColorNodeHex(track, a), '#000000');
-    const bRgb = parseHexColor(dmxColorNodeHex(track, b), '#000000');
+    const aRgb = parseHexColor(colorTrackNodeHex(track, a), '#000000');
+    const bRgb = parseHexColor(colorTrackNodeHex(track, b), '#000000');
     return rgbToHex(lerpColor(aRgb, bRgb, ratio));
   }
-  return dmxColorNodeHex(track, sorted[sorted.length - 1]);
+  return colorTrackNodeHex(track, sorted[sorted.length - 1]);
 };
 
 const resolveDmxColorWrites = (track, time) => {
@@ -192,7 +229,7 @@ const resolveDmxColorWrites = (track, time) => {
   const fixtureType = cfg.fixtureType === 'rgbw' || cfg.fixtureType === 'mapping' ? cfg.fixtureType : 'rgb';
   const mappingChannels = Number(cfg.mappingChannels) === 3 ? 3 : 4;
   const start = clamp(Math.round(Number(cfg.channelStart) || 1), 1, 512);
-  const hexColor = sampleDmxColorHexAtTime(track, time);
+  const hexColor = sampleColorTrackHexAtTime(track, time);
   const rgb = parseHexColor(hexColor, '#000000');
   const rgbw = rgbToRgbw(rgb);
   const writes = [];
@@ -216,22 +253,43 @@ const resolveDmxColorWrites = (track, time) => {
   return writes;
 };
 
-const dmxColorValueToHex = (track, value) => {
-  if (!track || track.kind !== 'dmx-color') return '#000000';
-  const cfg = track.dmxColor || {};
+const resolveOscColorWrites = (track, time) => {
+  if (!track || track.kind !== 'osc-color') return [];
+  const cfg = track.oscColor || {};
+  const fixtureType = cfg.fixtureType === 'rgbw' ? 'rgbw' : 'rgb';
+  const outputRange = cfg.outputRange === 'unit' ? 'unit' : 'byte';
+  const baseAddressRaw = typeof track.oscAddress === 'string' && track.oscAddress.trim()
+    ? track.oscAddress.trim()
+    : '/osc/color';
+  const baseAddress = baseAddressRaw.replace(/\/+$/, '') || '/osc/color';
+  const hexColor = sampleColorTrackHexAtTime(track, time);
+  const rgb = parseHexColor(hexColor, '#000000');
+  const rgbw = rgbToRgbw(rgb);
+  const rawValues = fixtureType === 'rgbw'
+    ? [rgbw.r, rgbw.g, rgbw.b, rgbw.w]
+    : [rgb.r, rgb.g, rgb.b];
+  const values = outputRange === 'unit'
+    ? rawValues.map((value) => Math.round((clamp(Number(value) || 0, 0, 255) / 255) * 100) / 100)
+    : rawValues.map((value) => clamp(Math.round(Number(value) || 0), 0, 255));
+  return [{ address: baseAddress, values }];
+};
+
+const colorTrackValueToHex = (track, value) => {
+  const cfg = getColorTrackConfig(track);
+  if (!cfg) return '#000000';
   const min = Number.isFinite(track.min) ? track.min : 0;
   const max = Number.isFinite(track.max) ? track.max : 255;
   const ratio = clamp((Number(value) - min) / Math.max(max - min, 0.000001), 0, 1);
-  const from = parseHexColor(cfg.gradientFrom, '#ff0000');
-  const to = parseHexColor(cfg.gradientTo, '#0000ff');
+  const from = parseHexColor(cfg.gradientFrom, '#000000');
+  const to = parseHexColor(cfg.gradientTo, '#000000');
   return rgbToHex(lerpColor(from, to, ratio));
 };
 
-const dmxColorHexToValue = (track, hexColor) => {
-  if (!track || track.kind !== 'dmx-color') return Number(track?.default) || 0;
-  const cfg = track.dmxColor || {};
-  const from = parseHexColor(cfg.gradientFrom, '#ff0000');
-  const to = parseHexColor(cfg.gradientTo, '#0000ff');
+const colorTrackHexToValue = (track, hexColor) => {
+  const cfg = getColorTrackConfig(track);
+  if (!cfg) return Number(track?.default) || 0;
+  const from = parseHexColor(cfg.gradientFrom, '#000000');
+  const to = parseHexColor(cfg.gradientTo, '#000000');
   const target = parseHexColor(hexColor, '#000000');
   const dr = to.r - from.r;
   const dg = to.g - from.g;
@@ -247,6 +305,105 @@ const dmxColorHexToValue = (track, hexColor) => {
   const min = Number.isFinite(track.min) ? track.min : 0;
   const max = Number.isFinite(track.max) ? track.max : 255;
   return clamp(min + (max - min) * ratio, min, max);
+};
+
+const getOscArrayValueCount = (track) => (
+  clamp(Math.round(Number(track?.oscArray?.valueCount) || 5), 1, 20)
+);
+
+const normalizeOscArrayNodeValues = (track, node) => {
+  const count = getOscArrayValueCount(track);
+  const min = Number.isFinite(track?.min) ? Number(track.min) : 0;
+  const max = Number.isFinite(track?.max) ? Number(track.max) : 1;
+  const fallback = clamp(Number(node?.v ?? track?.default ?? 0) || 0, min, max);
+  const raw = Array.isArray(node?.arr) ? node.arr : [];
+  return Array.from({ length: count }, (_, index) => (
+    clamp(Number(raw[index] ?? fallback) || 0, min, max)
+  ));
+};
+
+const getOscSendValueType = (track) => (track?.oscValueType === 'int' ? 'int' : 'float');
+
+const formatOscOutputScalar = (value, valueType) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  if (valueType === 'int') return Math.round(numeric);
+  return Math.round(numeric * 100) / 100;
+};
+
+const formatOscOutputArray = (values, valueType) => {
+  const raw = Array.isArray(values) ? values : [];
+  return raw.map((value) => formatOscOutputScalar(value, valueType));
+};
+
+const normalizeOscOutputName = (value, index = 0) => {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return `OSC Output ${String(index + 1).padStart(2, '0')}`;
+};
+
+const normalizeOscOutputHost = (value) => (
+  typeof value === 'string' && value.trim()
+    ? value.trim()
+    : '127.0.0.1'
+);
+
+const normalizeOscOutputPort = (value, fallback = 9000) => (
+  clamp(Math.round(Number(value) || fallback), 1, 65535)
+);
+
+const normalizeOscOutputsForUi = (oscSettings) => {
+  const raw = Array.isArray(oscSettings?.outputs) ? oscSettings.outputs : [];
+  const fallbackHost = normalizeOscOutputHost(oscSettings?.host);
+  const fallbackPort = normalizeOscOutputPort(oscSettings?.port, 9000);
+  const normalized = [];
+  const ids = new Set();
+  raw.forEach((entry, index) => {
+    const source = entry || {};
+    let id =
+      typeof source.id === 'string' && source.id.trim()
+        ? source.id.trim()
+        : `osc-out-${index + 1}`;
+    if (ids.has(id)) id = `${id}-${index + 1}`;
+    ids.add(id);
+    normalized.push({
+      id,
+      name: normalizeOscOutputName(source.name, index),
+      host: normalizeOscOutputHost(source.host || fallbackHost),
+      port: normalizeOscOutputPort(source.port, fallbackPort),
+    });
+  });
+  if (normalized.length) return normalized;
+  return [{
+    id: DEFAULT_OSC_OUTPUT_ID,
+    name: 'Main',
+    host: fallbackHost,
+    port: fallbackPort,
+  }];
+};
+
+const sampleOscArrayTrackValues = (track, time) => {
+  const count = getOscArrayValueCount(track);
+  const min = Number.isFinite(track?.min) ? Number(track.min) : 0;
+  const max = Number.isFinite(track?.max) ? Number(track.max) : 1;
+  const defaultValue = clamp(Number(track?.default ?? 0) || 0, min, max);
+  const fallback = Array.from({ length: count }, () => defaultValue);
+  if (!track || track.kind !== 'osc-array') return fallback;
+  const nodes = Array.isArray(track.nodes) ? track.nodes : [];
+  if (!nodes.length) return fallback;
+  const sorted = [...nodes].sort((a, b) => a.t - b.t);
+  if (time <= sorted[0].t) return normalizeOscArrayNodeValues(track, sorted[0]);
+  if (time >= sorted[sorted.length - 1].t) return normalizeOscArrayNodeValues(track, sorted[sorted.length - 1]);
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (time < a.t || time > b.t) continue;
+    const aValues = normalizeOscArrayNodeValues(track, a);
+    const bValues = normalizeOscArrayNodeValues(track, b);
+    if (Math.abs(b.t - a.t) < 1e-9) return bValues;
+    const ratio = clamp((time - a.t) / (b.t - a.t), 0, 1);
+    return aValues.map((value, index) => clamp(value + (bValues[index] - value) * ratio, min, max));
+  }
+  return normalizeOscArrayNodeValues(track, sorted[sorted.length - 1]);
 };
 
 export default function App() {
@@ -274,6 +431,7 @@ export default function App() {
   const [selectedNodeContext, setSelectedNodeContext] = useState({ trackId: null, nodeIds: [] });
   const [editingNode, setEditingNode] = useState(null);
   const [editingCue, setEditingCue] = useState(null);
+  const [editingLoopRange, setEditingLoopRange] = useState(null);
   const [editingAudioClip, setEditingAudioClip] = useState(null);
   const [audioChannelMapTrackId, setAudioChannelMapTrackId] = useState(null);
   const [audioChannelMapDraft, setAudioChannelMapDraft] = useState(null);
@@ -303,7 +461,7 @@ export default function App() {
   const [isUiResizing, setIsUiResizing] = useState(false);
   const [oscListenState, setOscListenState] = useState({
     status: 'stopped',
-    port: Number(project.osc?.listenPort) || 9001,
+    port: Number(project.osc?.listenPort) || 8999,
     error: null,
     lastAddress: null,
     lastAt: null,
@@ -348,7 +506,9 @@ export default function App() {
   const midiInputRef = useRef(null);
   const midiOutputRef = useRef(null);
   const midiTrackRuntimeRef = useRef(new Map());
+  const midiNoteRuntimeRef = useRef(new Map());
   const artNetSequenceRef = useRef(new Map());
+  const oscFlagPlaybackRef = useRef({ lastTime: null });
   const nativeAudioConfigKeyRef = useRef('');
   const nativeAudioMixKeyRef = useRef('');
   const [audioWaveforms, setAudioWaveforms] = useState({});
@@ -378,6 +538,15 @@ export default function App() {
     () => project.tracks.find((track) => track.id === selectedTrackId),
     [project.tracks, selectedTrackId]
   );
+  const selectedInspectorNode = useMemo(() => {
+    if (!selectedTrack || selectedTrack.kind !== 'osc-flag') return null;
+    if (selectedNodeContext.trackId !== selectedTrack.id) return null;
+    if (!Array.isArray(selectedNodeContext.nodeIds) || selectedNodeContext.nodeIds.length !== 1) return null;
+    const nodeId = selectedNodeContext.nodeIds[0];
+    return Array.isArray(selectedTrack.nodes)
+      ? (selectedTrack.nodes.find((node) => node.id === nodeId) || null)
+      : null;
+  }, [selectedTrack, selectedNodeContext]);
   const audioChannelMapTrack = useMemo(
     () => project.tracks.find((track) => track.id === audioChannelMapTrackId && track.kind === 'audio') || null,
     [project.tracks, audioChannelMapTrackId]
@@ -1403,7 +1572,7 @@ export default function App() {
   useEffect(() => {
     const bridge = window.oscDaw;
     if (!bridge?.startOscListening || !bridge?.stopOscListening) return undefined;
-    const listenPort = Number(project.osc?.listenPort) || 9001;
+    const listenPort = Number(project.osc?.listenPort) || 8999;
     let cancelled = false;
 
     if (!isRecording) {
@@ -1479,15 +1648,16 @@ export default function App() {
   useEffect(() => {
     const bridge = window.oscDaw;
     if (!bridge?.startOscControlListening || !bridge?.onOscControlMessage) return undefined;
-    const controlPort = Number(project.osc?.controlPort) || 9002;
+    const controlPort = Number(project.osc?.controlPort) || 8998;
     let cancelled = false;
 
     const unsubscribe = bridge.onOscControlMessage((payload) => {
       if (cancelled) return;
       const address = typeof payload?.address === 'string' ? payload.address.trim().toLowerCase() : '';
+      const canonicalAddress = address.startsWith('/osconductor') ? address : '';
       const value = Number(payload?.value);
       const args = Array.isArray(payload?.args) ? payload.args : [];
-      if (!address) return;
+      if (!canonicalAddress) return;
       const isOn = Number.isFinite(value) ? value >= 0.5 : false;
 
       const resolveCueNumber = (path, numericValue, argumentList = []) => {
@@ -1496,8 +1666,18 @@ export default function App() {
           .find((item) => Number.isFinite(item));
         if (Number.isFinite(argNumber)) return Math.round(argNumber);
         if (Number.isFinite(numericValue)) return Math.round(numericValue);
-        const match = /^\/oscdaw\/cue\/(\d+)$/.exec(path);
+        const match = /^\/osconductor\/cue\/(\d+)$/.exec(path);
         if (match) return Number(match[1]);
+        return null;
+      };
+
+      const resolveOnOffValue = (pathValue, numericValue, argumentList = []) => {
+        if (Number.isFinite(pathValue)) return pathValue >= 0.5;
+        const argNumber = argumentList
+          .map((item) => Number(item))
+          .find((item) => Number.isFinite(item));
+        if (Number.isFinite(argNumber)) return argNumber >= 0.5;
+        if (Number.isFinite(numericValue)) return numericValue >= 0.5;
         return null;
       };
 
@@ -1546,7 +1726,7 @@ export default function App() {
         return target;
       };
 
-      const compositionMatch = /^\/oscdaw\/composition\/(\d+)\/([a-z0-9_-]+)(?:\/(\d+))?$/.exec(address);
+      const compositionMatch = /^\/osconductor\/composition\/(\d+)\/([a-z0-9_-]+)(?:\/(\d+))?$/.exec(canonicalAddress);
       if (compositionMatch) {
         const compositionNumber = Number(compositionMatch[1]);
         const command = compositionMatch[2];
@@ -1579,27 +1759,35 @@ export default function App() {
         }
         if (command === 'cue') {
           const cueNumber = resolveCueNumber(
-            address,
+            canonicalAddress,
             Number.isFinite(commandPathValue) ? commandPathValue : value,
             args
           );
           jumpToCueNumber(cueNumber, targetComposition.cues, targetComposition.view);
+          return;
+        }
+        if (command === 'loop') {
+          const nextLoopEnabled = resolveOnOffValue(commandPathValue, value, args);
+          if (nextLoopEnabled === null) return;
+          dispatch({
+            type: 'update-project',
+            patch: { view: { loopEnabled: nextLoopEnabled } },
+          });
         }
         return;
       }
 
-      // Legacy aliases (without composition segment).
-      if (address === '/oscdaw/rec') {
+      if (canonicalAddress === '/osconductor/rec') {
         if (!Number.isFinite(value)) return;
         setIsRecording((prev) => (prev === isOn ? prev : isOn));
         return;
       }
-      if (address === '/oscdaw/play') {
+      if (canonicalAddress === '/osconductor/play') {
         if (!Number.isFinite(value)) return;
         setIsPlaying((prev) => (prev === isOn ? prev : isOn));
         return;
       }
-      if (address === '/oscdaw/stop') {
+      if (canonicalAddress === '/osconductor/stop') {
         if (!Number.isFinite(value) || !isOn) return;
         setIsPlaying(false);
         stopInternalClock();
@@ -1609,9 +1797,18 @@ export default function App() {
         syncAudioToPlayhead(0);
         return;
       }
-      if (address === '/oscdaw/cue' || address.startsWith('/oscdaw/cue/')) {
-        const cueNumber = resolveCueNumber(address, value, args);
+      if (canonicalAddress === '/osconductor/cue' || canonicalAddress.startsWith('/osconductor/cue/')) {
+        const cueNumber = resolveCueNumber(canonicalAddress, value, args);
         jumpToCueNumber(cueNumber, cuesRef.current, viewRef.current);
+        return;
+      }
+      if (canonicalAddress === '/osconductor/loop' || canonicalAddress.startsWith('/osconductor/loop/')) {
+        const nextLoopEnabled = resolveOnOffValue(null, value, args);
+        if (nextLoopEnabled === null) return;
+        dispatch({
+          type: 'update-project',
+          patch: { view: { loopEnabled: nextLoopEnabled } },
+        });
       }
     });
 
@@ -2725,15 +2922,23 @@ export default function App() {
       const elapsed = Math.max((now - internalClockRef.current.startPerf) / 1000, 0);
       setPlayhead((prev) => {
         const span = project.view.end - project.view.start;
+        const loopEnabled = Boolean(project.view.loopEnabled);
+        const loopStart = clamp(Number(project.view.loopStart) || 0, 0, project.view.length);
+        const loopEnd = clamp(Number(project.view.loopEnd) || 0, 0, project.view.length);
+        const loopSpan = Math.max(loopEnd - loopStart, 0);
         let next = internalClockRef.current.startPlayhead + elapsed;
-        if (next >= project.view.length) {
+        if (loopEnabled && loopSpan > 0.0001 && next >= loopStart) {
+          if (next >= loopEnd) {
+            next = loopStart + ((next - loopStart) % loopSpan);
+          }
+        } else if (next >= project.view.length) {
           next = project.view.length;
           setIsPlaying(false);
           stopInternalClock();
         }
-        if (next > project.view.end) {
+        if (next > project.view.end || next < project.view.start) {
           const targetStart = clamp(
-            next - span * 0.75,
+            next - span * 0.25,
             0,
             Math.max(project.view.length - span, 0)
           );
@@ -2747,7 +2952,16 @@ export default function App() {
     return () => {
       cancelAnimationFrame(rafId);
     };
-  }, [isPlaying, project.timebase.sync, project.view.end, project.view.start, project.view.length]);
+  }, [
+    isPlaying,
+    project.timebase.sync,
+    project.view.end,
+    project.view.start,
+    project.view.length,
+    project.view.loopEnabled,
+    project.view.loopStart,
+    project.view.loopEnd,
+  ]);
 
   useEffect(() => {
     if (project.timebase.sync !== 'MTC') return undefined;
@@ -2852,18 +3066,43 @@ export default function App() {
     if (!isPlaying) return undefined;
     const fps = Math.max(Number(project.timebase.fps) || 30, 1);
     const tickMs = Math.max(1000 / fps, 4);
+    const outputs = normalizeOscOutputsForUi(project.osc);
+    const defaultOutput = outputs[0] || {
+      id: DEFAULT_OSC_OUTPUT_ID,
+      name: 'Main',
+      host: '127.0.0.1',
+      port: 9000,
+    };
+    const outputMap = new Map(outputs.map((output) => [output.id, output]));
+    const resolveOutput = (track) => {
+      if (!track) return defaultOutput;
+      const outputId = typeof track.oscOutputId === 'string' && track.oscOutputId
+        ? track.oscOutputId
+        : defaultOutput.id;
+      return outputMap.get(outputId) || defaultOutput;
+    };
     const sendOscFrame = () => {
       const bridge = window.oscDaw;
       if (!bridge || typeof bridge.sendOscMessage !== 'function') return;
-      const host = project.osc?.host || '127.0.0.1';
-      const port = Number(project.osc?.port) || 9000;
       project.tracks.forEach((track) => {
-        if (track.kind !== 'osc') return;
-        if (!isTrackEnabled(track, 'osc')) return;
         const address = typeof track.oscAddress === 'string' ? track.oscAddress.trim() : '';
         if (!address) return;
-        const value = sampleTrackValue(track, playheadRef.current);
-        bridge.sendOscMessage({ host, port, address, value });
+        const output = resolveOutput(track);
+        const host = output.host || '127.0.0.1';
+        const port = Number(output.port) || 9000;
+        if (track.kind === 'osc') {
+          if (!isTrackEnabled(track, 'osc')) return;
+          const valueType = getOscSendValueType(track);
+          const value = formatOscOutputScalar(sampleTrackValue(track, playheadRef.current), valueType);
+          bridge.sendOscMessage({ host, port, address, value, valueType });
+          return;
+        }
+        if (track.kind === 'osc-array') {
+          if (!isTrackEnabled(track, 'osc-array')) return;
+          const valueType = getOscSendValueType(track);
+          const values = formatOscOutputArray(sampleOscArrayTrackValues(track, playheadRef.current), valueType);
+          bridge.sendOscMessage({ host, port, address, value: values, valueType });
+        }
       });
     };
     sendOscFrame();
@@ -2871,7 +3110,176 @@ export default function App() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isPlaying, project.osc?.host, project.osc?.port, project.timebase.fps, project.tracks]);
+  }, [isPlaying, project.timebase.fps, project.tracks, project.osc]);
+
+  useEffect(() => {
+    if (!isPlaying) return undefined;
+    const fps = Math.max(Number(project.timebase.fps) || 30, 1);
+    const tickMs = Math.max(1000 / fps, 4);
+    const outputs = normalizeOscOutputsForUi(project.osc);
+    const defaultOutput = outputs[0] || {
+      id: DEFAULT_OSC_OUTPUT_ID,
+      name: 'Main',
+      host: '127.0.0.1',
+      port: 9000,
+    };
+    const outputMap = new Map(outputs.map((output) => [output.id, output]));
+    const resolveOutput = (track) => {
+      if (!track) return defaultOutput;
+      const outputId = typeof track.oscOutputId === 'string' && track.oscOutputId
+        ? track.oscOutputId
+        : defaultOutput.id;
+      return outputMap.get(outputId) || defaultOutput;
+    };
+    const sendOscColorFrame = () => {
+      const bridge = window.oscDaw;
+      if (!bridge || typeof bridge.sendOscMessage !== 'function') return;
+      const currentTime = playheadRef.current;
+      project.tracks.forEach((track) => {
+        if (track.kind !== 'osc-color') return;
+        if (!isTrackEnabled(track, 'osc-color')) return;
+        const output = resolveOutput(track);
+        const host = output.host || '127.0.0.1';
+        const port = Number(output.port) || 9000;
+        const writes = resolveOscColorWrites(track, currentTime);
+        writes.forEach((write) => {
+          if (!write?.address) return;
+          const payloadValue = Array.isArray(write.values)
+            ? write.values
+            : (Array.isArray(write.value) ? write.value : [Number(write.value) || 0]);
+          bridge.sendOscMessage({
+            host,
+            port,
+            address: write.address,
+            value: payloadValue,
+          });
+        });
+      });
+    };
+    sendOscColorFrame();
+    const intervalId = window.setInterval(sendOscColorFrame, tickMs);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isPlaying, project.timebase.fps, project.tracks, project.osc]);
+
+  useEffect(() => {
+    if (!isPlaying) return undefined;
+    const fps = Math.max(Number(project.timebase.fps) || 30, 1);
+    const tickMs = Math.max(1000 / fps, 4);
+    const epsilon = 0.5 / fps;
+    const outputs = normalizeOscOutputsForUi(project.osc);
+    const defaultOutput = outputs[0] || {
+      id: DEFAULT_OSC_OUTPUT_ID,
+      name: 'Main',
+      host: '127.0.0.1',
+      port: 9000,
+    };
+    const outputMap = new Map(outputs.map((output) => [output.id, output]));
+    const resolveOutput = (track) => {
+      if (!track) return defaultOutput;
+      const outputId = typeof track.oscOutputId === 'string' && track.oscOutputId
+        ? track.oscOutputId
+        : defaultOutput.id;
+      return outputMap.get(outputId) || defaultOutput;
+    };
+
+    const sendOscFlagEvents = () => {
+      const bridge = window.oscDaw;
+      if (!bridge || typeof bridge.sendOscMessage !== 'function') return;
+      const projectLength = Math.max(Number(project.view.length) || 0, 0);
+      const currentTime = clamp(Number(playheadRef.current) || 0, 0, projectLength);
+      const rawPrevTime = Number(oscFlagPlaybackRef.current.lastTime);
+      const hasPrevTime = Number.isFinite(rawPrevTime);
+      const prevTime = hasPrevTime ? clamp(rawPrevTime, 0, projectLength) : currentTime;
+      const maxContinuousStep = Math.max((tickMs / 1000) * 4, 0.12);
+
+      const loopEnabled = Boolean(project.view.loopEnabled);
+      const loopStart = clamp(Number(project.view.loopStart) || 0, 0, projectLength);
+      const loopEnd = clamp(Number(project.view.loopEnd) || projectLength, 0, projectLength);
+
+      const ranges = [];
+      const pushRange = (start, end, includeStart) => {
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+        const safeStart = clamp(Math.min(start, end), 0, projectLength);
+        const safeEnd = clamp(Math.max(start, end), 0, projectLength);
+        ranges.push({ start: safeStart, end: safeEnd, includeStart: Boolean(includeStart) });
+      };
+
+      if (!hasPrevTime) {
+        pushRange(currentTime, currentTime, true);
+      } else if (currentTime >= prevTime) {
+        if (currentTime - prevTime > maxContinuousStep) {
+          pushRange(currentTime, currentTime, true);
+        } else {
+          pushRange(prevTime, currentTime, false);
+        }
+      } else if (loopEnabled && loopEnd - loopStart > epsilon) {
+        pushRange(prevTime, loopEnd, false);
+        pushRange(loopStart, currentTime, true);
+      } else {
+        pushRange(currentTime, currentTime, true);
+      }
+
+      const isTriggered = (nodeTime) => ranges.some((range) => {
+        if (range.includeStart) {
+          return nodeTime >= range.start - epsilon && nodeTime <= range.end + epsilon;
+        }
+        return nodeTime > range.start + epsilon && nodeTime <= range.end + epsilon;
+      });
+
+      const isTimeWithinRange = (time, start, end, includeStart = true) => {
+        if (includeStart) return time >= start - epsilon && time <= end + epsilon;
+        return time > start + epsilon && time <= end + epsilon;
+      };
+
+      project.tracks.forEach((track) => {
+        if (track.kind !== 'osc-flag') return;
+        if (!isTrackEnabled(track, 'osc-flag')) return;
+        const output = resolveOutput(track);
+        const host = output.host || '127.0.0.1';
+        const port = Number(output.port) || 9000;
+        const fallbackAddress = normalizeOscAddressPath(track.oscAddress, '/osc/flag');
+        const nodes = Array.isArray(track.nodes) ? track.nodes : [];
+        nodes.forEach((node) => {
+          const triggerStart = Number(node?.t);
+          if (!Number.isFinite(triggerStart)) return;
+          const triggerDuration = Math.max(Number(node?.d) || 1, 0);
+          const triggerValueRaw = Number.isFinite(Number(node?.v)) ? Number(node.v) : 1;
+          const triggerValue = Math.round(triggerValueRaw * 100) / 100;
+
+          const isStartTriggered = isTriggered(triggerStart);
+          const inActiveWindow = triggerDuration > epsilon
+            && isTimeWithinRange(currentTime, triggerStart, triggerStart + triggerDuration, true);
+          if (!isStartTriggered && !inActiveWindow) return;
+
+          const baseAddress = normalizeOscAddressPath(node?.a, fallbackAddress).replace(/\/+$/, '');
+          const valueText = Number.isInteger(triggerValue)
+            ? String(triggerValue)
+            : String(triggerValue);
+          const address = `${baseAddress}/${valueText}`;
+          bridge.sendOscMessage({ host, port, address, value: triggerValue });
+        });
+      });
+
+      oscFlagPlaybackRef.current.lastTime = currentTime;
+    };
+
+    sendOscFlagEvents();
+    const intervalId = window.setInterval(sendOscFlagEvents, tickMs);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [
+    isPlaying,
+    project.timebase.fps,
+    project.tracks,
+    project.view.length,
+    project.view.loopEnabled,
+    project.view.loopStart,
+    project.view.loopEnd,
+    project.osc,
+  ]);
 
   useEffect(() => {
     if (!isPlaying) return undefined;
@@ -2948,6 +3356,7 @@ export default function App() {
     if (!isPlaying) return undefined;
     const fps = Math.max(Number(project.timebase.fps) || 30, 1);
     const tickMs = Math.max(1000 / fps, 4);
+    const minNoteDuration = 1 / fps;
 
     const sendMidiBytes = (outputId, bytes) => {
       const targetId = typeof outputId === 'string' && outputId ? outputId : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID);
@@ -2984,7 +3393,8 @@ export default function App() {
       }
     };
 
-    const runtime = midiTrackRuntimeRef.current;
+    const ccRuntime = midiTrackRuntimeRef.current;
+    const noteRuntime = midiNoteRuntimeRef.current;
     const sendNoteOff = (state) => {
       const channel = Math.max(0, Math.min(15, Math.round(Number(state?.channel) || 0)));
       const noteNumber = Math.max(0, Math.min(127, Math.round(Number(state?.note) || 0)));
@@ -2993,52 +3403,62 @@ export default function App() {
         : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID);
       sendMidiBytes(outputId, [0x80 | channel, noteNumber, 0]);
     };
+
     const sendTick = () => {
       const currentTime = playheadRef.current;
+      const activeCcTrackIds = new Set();
       project.tracks.forEach((track) => {
         if (track.kind !== 'midi') return;
-        const mode = track.midi?.mode === 'note' ? 'note' : 'cc';
+        activeCcTrackIds.add(track.id);
         const outputId = getMidiTrackOutputId(track);
         const channel = Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1))) - 1;
         const enabled = isTrackEnabled(track, 'midi');
-        const state = runtime.get(track.id) || { noteOn: false, lastCc: null };
+        if (!enabled) return;
+        const state = ccRuntime.get(track.id) || { lastCc: null };
+        const controlNumber = Math.max(0, Math.min(127, Math.round(Number(track.midi?.controlNumber) || 1)));
+        const ccValue = Math.max(0, Math.min(127, Math.round(sampleTrackValue(track, currentTime))));
+        if (state.lastCc === ccValue) return;
+        sendMidiBytes(outputId, [0xb0 | channel, controlNumber, ccValue]);
+        ccRuntime.set(track.id, { ...state, lastCc: ccValue });
+      });
 
-        if (mode === 'cc') {
-          if (state.noteOn) {
-            sendNoteOff(state);
-          }
-          if (!enabled) return;
-          const controlNumber = Math.max(0, Math.min(127, Math.round(Number(track.midi?.controlNumber) || 1)));
-          const ccValue = Math.max(0, Math.min(127, Math.round(sampleTrackValue(track, currentTime))));
-          if (state.lastCc === ccValue) return;
-          sendMidiBytes(outputId, [0xb0 | channel, controlNumber, ccValue]);
-          runtime.set(track.id, { ...state, lastCc: ccValue, noteOn: false });
-          return;
-        }
+      ccRuntime.forEach((_state, trackId) => {
+        if (activeCcTrackIds.has(trackId)) return;
+        ccRuntime.delete(trackId);
+      });
 
-        const noteNumber = Math.max(0, Math.min(127, Math.round(Number(track.midi?.note) || 60)));
+      const activeNoteKeys = new Set();
+      project.tracks.forEach((track) => {
+        if (track.kind !== 'midi-note') return;
+        if (!isTrackEnabled(track, 'midi-note')) return;
+        const outputId = getMidiTrackOutputId(track);
+        const channel = Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1))) - 1;
         const velocity = Math.max(0, Math.min(127, Math.round(Number(track.midi?.velocity) || 100)));
-        const nextGate = enabled && sampleTrackValue(track, currentTime) >= 0.5;
-        if (nextGate === Boolean(state.noteOn)) return;
-        if (nextGate) {
-          sendMidiBytes(outputId, [0x90 | channel, noteNumber, velocity]);
-          runtime.set(track.id, {
-            ...state,
-            noteOn: true,
+        const nodes = Array.isArray(track.nodes) ? track.nodes : [];
+        nodes.forEach((node) => {
+          const start = Number(node?.t);
+          if (!Number.isFinite(start)) return;
+          const duration = Math.max(Number(node?.d) || 0.5, minNoteDuration);
+          const end = start + duration;
+          if (currentTime < start || currentTime >= end) return;
+          const noteNumber = Math.max(0, Math.min(127, Math.round(Number(node?.v) || 60)));
+          const key = `${track.id}:${node.id}`;
+          activeNoteKeys.add(key);
+          if (noteRuntime.has(key)) return;
+          const sent = sendMidiBytes(outputId, [0x90 | channel, noteNumber, velocity]);
+          if (!sent) return;
+          noteRuntime.set(key, {
             outputId,
             channel,
             note: noteNumber,
           });
-          return;
-        }
-        sendMidiBytes(outputId, [0x80 | channel, noteNumber, 0]);
-        runtime.set(track.id, {
-          ...state,
-          noteOn: false,
-          outputId,
-          channel,
-          note: noteNumber,
         });
+      });
+
+      noteRuntime.forEach((state, key) => {
+        if (activeNoteKeys.has(key)) return;
+        sendNoteOff(state);
+        noteRuntime.delete(key);
       });
     };
 
@@ -3051,51 +3471,43 @@ export default function App() {
 
   useEffect(() => {
     if (isPlaying) return;
-    const runtime = midiTrackRuntimeRef.current;
-    if (!runtime.size) return;
-    const trackById = new Map(project.tracks.map((track) => [track.id, track]));
-
-    runtime.forEach((state, trackId) => {
-      if (!state?.noteOn) return;
-      const track = trackById.get(trackId);
-      const outputId = track && track.kind === 'midi'
-        ? getMidiTrackOutputId(track)
-        : (typeof state.outputId === 'string' && state.outputId ? state.outputId : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID));
-      const channel = track && track.kind === 'midi'
-        ? Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1))) - 1
-        : Math.max(0, Math.min(15, Math.round(Number(state.channel) || 0)));
-      const noteNumber = track && track.kind === 'midi'
-        ? Math.max(0, Math.min(127, Math.round(Number(track.midi?.note) || 60)))
-        : Math.max(0, Math.min(127, Math.round(Number(state.note) || 0)));
-      if (outputId === VIRTUAL_MIDI_OUTPUT_ID) {
-        const bridge = window.oscDaw;
-        bridge?.sendVirtualMidiMessage?.({ bytes: [0x80 | channel, noteNumber, 0] }).catch(() => {});
-      } else {
-        const output = midiAccessRef.current?.outputs?.get(outputId) || null;
-        try {
-          output?.send?.([0x80 | channel, noteNumber, 0]);
-        } catch (error) {
-          // Ignore note-off send failures.
+    const noteRuntime = midiNoteRuntimeRef.current;
+    if (noteRuntime.size) {
+      noteRuntime.forEach((state) => {
+        const channel = Math.max(0, Math.min(15, Math.round(Number(state?.channel) || 0)));
+        const noteNumber = Math.max(0, Math.min(127, Math.round(Number(state?.note) || 0)));
+        const outputId = typeof state?.outputId === 'string' && state.outputId
+          ? state.outputId
+          : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID);
+        if (outputId === VIRTUAL_MIDI_OUTPUT_ID) {
+          const bridge = window.oscDaw;
+          bridge?.sendVirtualMidiMessage?.({ bytes: [0x80 | channel, noteNumber, 0] }).catch(() => {});
+        } else {
+          const output = midiAccessRef.current?.outputs?.get(outputId) || null;
+          try {
+            output?.send?.([0x80 | channel, noteNumber, 0]);
+          } catch (error) {
+            // Ignore note-off send failures.
+          }
         }
-      }
-    });
-
-    runtime.clear();
+      });
+      noteRuntime.clear();
+    }
+    midiTrackRuntimeRef.current.clear();
   }, [isPlaying, project.tracks, project.midi?.outputId]);
 
   useEffect(() => {
-    const runtime = midiTrackRuntimeRef.current;
-    if (!runtime.size) return;
-    const activeMidiTrackIds = new Set(
-      project.tracks.filter((track) => track.kind === 'midi').map((track) => track.id)
-    );
-
-    runtime.forEach((state, trackId) => {
-      if (activeMidiTrackIds.has(trackId)) return;
-      if (state?.noteOn) {
-        const channel = Math.max(0, Math.min(15, Math.round(Number(state.channel) || 0)));
-        const noteNumber = Math.max(0, Math.min(127, Math.round(Number(state.note) || 0)));
-        const outputId = typeof state.outputId === 'string' && state.outputId
+    const noteRuntime = midiNoteRuntimeRef.current;
+    if (noteRuntime.size) {
+      const activeNoteTrackIds = new Set(
+        project.tracks.filter((track) => track.kind === 'midi-note').map((track) => track.id)
+      );
+      noteRuntime.forEach((state, key) => {
+        const [trackId] = String(key).split(':');
+        if (activeNoteTrackIds.has(trackId)) return;
+        const channel = Math.max(0, Math.min(15, Math.round(Number(state?.channel) || 0)));
+        const noteNumber = Math.max(0, Math.min(127, Math.round(Number(state?.note) || 0)));
+        const outputId = typeof state?.outputId === 'string' && state.outputId
           ? state.outputId
           : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID);
         if (outputId === VIRTUAL_MIDI_OUTPUT_ID) {
@@ -3109,8 +3521,18 @@ export default function App() {
             // Ignore note-off failures while removing tracks.
           }
         }
-      }
-      runtime.delete(trackId);
+        noteRuntime.delete(key);
+      });
+    }
+
+    const ccRuntime = midiTrackRuntimeRef.current;
+    if (!ccRuntime.size) return;
+    const activeCcTrackIds = new Set(
+      project.tracks.filter((track) => track.kind === 'midi').map((track) => track.id)
+    );
+    ccRuntime.forEach((_state, trackId) => {
+      if (activeCcTrackIds.has(trackId)) return;
+      ccRuntime.delete(trackId);
     });
   }, [project.tracks, project.midi?.outputId]);
 
@@ -3460,6 +3882,10 @@ export default function App() {
             .map((node) => ({
               t: node.t,
               v: node.v,
+              arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
+              a: node.a,
+              d: node.d,
+              y: node.y,
               c: node.c,
               curve: node.curve || 'linear',
             }))
@@ -3527,6 +3953,10 @@ export default function App() {
           const nodes = copiedNodes.map((node) => ({
             t: clamp(playhead + ((Number(node.t) || 0) - baseTime), 0, project.view.length),
             v: Number(node.v) || 0,
+            arr: Array.isArray(node.arr) ? [...node.arr] : undefined,
+            a: node.a,
+            d: node.d,
+            y: node.y,
             c: node.c,
             curve: node.curve || 'linear',
           }));
@@ -3559,7 +3989,11 @@ export default function App() {
       }
       if (withCommand && key === 'm') {
         event.preventDefault();
-        dispatch({ type: 'add-track', kind: 'midi' });
+        if (event.shiftKey) {
+          dispatch({ type: 'add-track', kind: 'midi-note' });
+        } else {
+          dispatch({ type: 'add-track', kind: 'midi' });
+        }
         return;
       }
       if (withCommand && key === 'd') {
@@ -3569,6 +4003,15 @@ export default function App() {
         } else {
           dispatch({ type: 'add-track', kind: 'dmx' });
         }
+        return;
+      }
+      if (withCommand && (event.code === 'Equal' || event.code === 'Minus')) {
+        event.preventDefault();
+        dispatch({
+          type: 'zoom-time',
+          direction: event.code === 'Equal' ? 1 : -1,
+          center: playhead,
+        });
         return;
       }
       if (event.repeat) return;
@@ -3677,6 +4120,11 @@ export default function App() {
       setPlayhead(project.view.length);
     }
   }, [playhead, project.view.length]);
+
+  useEffect(() => {
+    if (isPlaying) return;
+    oscFlagPlaybackRef.current.lastTime = clamp(Number(playheadRef.current) || 0, 0, project.view.length);
+  }, [isPlaying, project.view.length, playhead]);
 
   useEffect(() => {
     let changed = false;
@@ -3919,6 +4367,60 @@ export default function App() {
   const handleAddNode = (trackId, node) => {
     const track = project.tracks.find((item) => item.id === trackId);
     if (track?.kind === 'audio') return;
+    if (track?.kind === 'midi-note') {
+      const safeNode = {
+        ...node,
+        t: clamp(Number(node?.t) || playhead, 0, project.view.length),
+        v: clamp(Math.round(Number(node?.v) || 60), 0, 127),
+        d: Math.max(Number(node?.d) || 0.5, 0.01),
+        curve: 'linear',
+      };
+      dispatch({
+        type: 'add-node',
+        id: trackId,
+        node: safeNode,
+      });
+      return;
+    }
+    if (track?.kind === 'osc-flag') {
+      const fallbackAddress = normalizeOscAddressPath(track.oscAddress, '/osc/flag');
+      const safeNode = {
+        ...node,
+        t: clamp(Number(node?.t) || playhead, 0, project.view.length),
+        v: Number.isFinite(Number(node?.v)) ? Number(node.v) : 1,
+        d: Math.max(Number(node?.d) || 1, 0),
+        y: Number.isFinite(Number(node?.y)) ? clamp(Number(node.y), 0, 1) : 0.5,
+        a: normalizeOscAddressPath(node?.a, fallbackAddress),
+      };
+      dispatch({
+        type: 'add-node',
+        id: trackId,
+        node: safeNode,
+      });
+      return;
+    }
+    if (track?.kind === 'osc-array') {
+      const safeTime = clamp(Number(node?.t) || playhead, 0, project.view.length);
+      const sampledValues = sampleOscArrayTrackValues(track, safeTime);
+      const raw = Array.isArray(node?.arr) ? node.arr : sampledValues;
+      const min = Number.isFinite(track.min) ? track.min : 0;
+      const max = Number.isFinite(track.max) ? track.max : 1;
+      const count = getOscArrayValueCount(track);
+      const values = Array.from({ length: count }, (_, index) => (
+        clamp(Number(raw[index] ?? sampledValues[index] ?? track.default ?? 0) || 0, min, max)
+      ));
+      dispatch({
+        type: 'add-node',
+        id: trackId,
+        node: {
+          ...node,
+          t: safeTime,
+          v: values[0] ?? 0,
+          arr: values,
+        },
+      });
+      return;
+    }
     dispatch({
       type: 'add-node',
       id: trackId,
@@ -3930,6 +4432,25 @@ export default function App() {
     const track = project.tracks.find((item) => item.id === trackId);
     if (track?.kind === 'audio') return;
     dispatch({ type: 'update-node', id: trackId, nodeId, patch });
+  };
+
+  const handlePatchSingleNode = (trackId, nodeId, patch) => {
+    const track = project.tracks.find((item) => item.id === trackId);
+    if (!track || track.kind === 'audio') return;
+    const nextPatch = { ...patch };
+    if (Object.prototype.hasOwnProperty.call(nextPatch, 't')) {
+      nextPatch.t = clamp(Number(nextPatch.t) || 0, 0, project.view.length);
+    }
+    if (Object.prototype.hasOwnProperty.call(nextPatch, 'd')) {
+      nextPatch.d = Math.max(Number(nextPatch.d) || 1, 0);
+    }
+    if (Object.prototype.hasOwnProperty.call(nextPatch, 'y')) {
+      nextPatch.y = Number.isFinite(Number(nextPatch.y)) ? clamp(Number(nextPatch.y), 0, 1) : 0.5;
+    }
+    if (track.kind === 'osc-flag' && Object.prototype.hasOwnProperty.call(nextPatch, 'a')) {
+      nextPatch.a = normalizeOscAddressPath(nextPatch.a, normalizeOscAddressPath(track.oscAddress, '/osc/flag'));
+    }
+    dispatch({ type: 'update-node', id: trackId, nodeId, patch: nextPatch });
   };
 
   const handleNodeSelectionChange = useCallback((trackId, nodeIds) => {
@@ -3946,18 +4467,90 @@ export default function App() {
   const handleEditNode = (trackId, nodeId, value, mode = 'value', colorHex = null) => {
     const track = project.tracks.find((item) => item.id === trackId);
     if (track?.kind === 'audio') return;
+    if (mode === 'midi-note' && track?.kind === 'midi-note') {
+      const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+      if (!node) return;
+      const parts = secondsToHmsfParts(
+        clamp(Number(node.t) || 0, 0, project.view.length),
+        syncFpsPreset.fps
+      );
+      setEditingNode({
+        trackId,
+        nodeId,
+        mode: 'midi-note',
+        noteHours: String(parts.hours),
+        noteMinutes: String(parts.minutes),
+        noteSeconds: String(parts.seconds),
+        noteFrames: String(parts.frames),
+        noteValue: String(clamp(Math.round(Number(node.v) || 60), 0, 127)),
+        noteLength: Number.isFinite(Number(node.d)) ? Number(node.d).toFixed(2) : '0.50',
+      });
+      return;
+    }
+    if (track?.kind === 'osc-flag') {
+      const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+      if (!node) return;
+      const parts = secondsToHmsfParts(
+        clamp(Number(node.t) || 0, 0, project.view.length),
+        syncFpsPreset.fps
+      );
+      setEditingNode({
+        trackId,
+        nodeId,
+        mode: 'osc-flag',
+        flagHours: String(parts.hours),
+        flagMinutes: String(parts.minutes),
+        flagSeconds: String(parts.seconds),
+        flagFrames: String(parts.frames),
+        triggerTime: Number.isFinite(Number(node.d)) ? Number(node.d).toFixed(2) : '1.00',
+        address: normalizeOscAddressPath(
+          node.a,
+          normalizeOscAddressPath(track.oscAddress, '/osc/flag')
+        ),
+        value: Number.isFinite(Number(node.v)) ? Number(node.v).toFixed(2) : '1.00',
+      });
+      return;
+    }
+    if (mode === 'osc-array' && track?.kind === 'osc-array') {
+      const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
+      if (!node) return;
+      const parts = secondsToHmsfParts(
+        clamp(Number(node.t) || 0, 0, project.view.length),
+        syncFpsPreset.fps
+      );
+      const values = normalizeOscArrayNodeValues(track, node).map((item) => Number(item).toFixed(2));
+      setEditingNode({
+        trackId,
+        nodeId,
+        mode: 'osc-array',
+        arrayHours: String(parts.hours),
+        arrayMinutes: String(parts.minutes),
+        arraySeconds: String(parts.seconds),
+        arrayFrames: String(parts.frames),
+        arrayValues: values,
+      });
+      return;
+    }
     const numeric = Number(value);
-    if (mode === 'color' && track?.kind === 'dmx-color') {
+    if (mode === 'color' && (track?.kind === 'dmx-color' || track?.kind === 'osc-color')) {
       const node = Array.isArray(track.nodes) ? track.nodes.find((item) => item.id === nodeId) : null;
       const fallbackColor = typeof node?.c === 'string' && HEX_COLOR_RE.test(node.c)
         ? node.c
-        : dmxColorValueToHex(track, Number.isFinite(numeric) ? numeric : track.default);
+        : colorTrackValueToHex(track, Number.isFinite(numeric) ? numeric : track.default);
       const color = typeof colorHex === 'string' && HEX_COLOR_RE.test(colorHex) ? colorHex : fallbackColor;
+      const parts = secondsToHmsfParts(
+        clamp(Number(node?.t) || 0, 0, project.view.length),
+        syncFpsPreset.fps
+      );
       setEditingNode({
         trackId,
         nodeId,
         mode: 'color',
         color: color.toLowerCase(),
+        colorHours: String(parts.hours),
+        colorMinutes: String(parts.minutes),
+        colorSeconds: String(parts.seconds),
+        colorFrames: String(parts.frames),
       });
       return;
     }
@@ -4118,6 +4711,29 @@ export default function App() {
     setIsRecording((prev) => !prev);
   };
 
+  const handleLoopToggle = () => {
+    const length = Math.max(Number(project.view.length) || 0, 0);
+    const minSpan = 1 / Math.max(syncFpsPreset.fps, 1);
+    let loopStart = clamp(Number(project.view.loopStart) || 0, 0, length);
+    let loopEnd = clamp(Number(project.view.loopEnd) || Math.min(project.view.end, length), 0, length);
+    if (loopEnd - loopStart < minSpan) {
+      loopEnd = clamp(loopStart + minSpan, 0, length);
+      if (loopEnd - loopStart < minSpan) {
+        loopStart = clamp(loopEnd - minSpan, 0, length);
+      }
+    }
+    dispatch({
+      type: 'update-project',
+      patch: {
+        view: {
+          loopEnabled: !project.view.loopEnabled,
+          loopStart,
+          loopEnd,
+        },
+      },
+    });
+  };
+
   const handleLocate = () => {
     setIsPlaying(false);
     stopInternalClock();
@@ -4129,15 +4745,115 @@ export default function App() {
 
   const handleSeek = (time) => {
     lastTickRef.current = null;
-    if (isPlaying && (project.timebase?.sync || 'Internal') === 'Internal') {
-      startInternalClock(time);
+    const nextTime = clamp(Number(time) || 0, 0, project.view.length);
+    const span = Math.max(project.view.end - project.view.start, 0.001);
+    if (nextTime < project.view.start || nextTime > project.view.end) {
+      const targetStart = clamp(
+        nextTime - span * 0.25,
+        0,
+        Math.max(project.view.length - span, 0)
+      );
+      dispatch({ type: 'scroll-time', start: targetStart });
     }
-    setPlayhead(time);
-    syncAudioToPlayhead(time);
+    if (isPlaying && (project.timebase?.sync || 'Internal') === 'Internal') {
+      startInternalClock(nextTime);
+    }
+    setPlayhead(nextTime);
+    syncAudioToPlayhead(nextTime);
   };
 
   const handleScroll = (start) => {
     dispatch({ type: 'scroll-time', start });
+  };
+
+  const handleTimecodeCommit = (text) => {
+    const parsed = parseHmsfTimecode(text, syncFpsPreset.fps);
+    if (!Number.isFinite(parsed)) return false;
+    const next = clamp(parsed, 0, project.view.length);
+    handleSeek(next);
+    return true;
+  };
+
+  const handleLoopRangeChange = ({ start, end }) => {
+    const length = Math.max(Number(project.view.length) || 0, 0);
+    const minSpan = 1 / Math.max(syncFpsPreset.fps, 1);
+    let loopStart = clamp(Number(start) || 0, 0, length);
+    let loopEnd = clamp(Number(end) || 0, 0, length);
+    if (loopEnd - loopStart < minSpan) {
+      if (loopStart <= Number(project.view.loopStart || 0)) {
+        loopStart = clamp(loopEnd - minSpan, 0, length);
+      } else {
+        loopEnd = clamp(loopStart + minSpan, 0, length);
+      }
+    }
+    dispatch({
+      type: 'update-project',
+      patch: {
+        view: {
+          loopStart,
+          loopEnd,
+        },
+      },
+    });
+  };
+
+  const handleOpenLoopRangeEditor = () => {
+    const startParts = secondsToHmsfParts(Number(project.view.loopStart) || 0, syncFpsPreset.fps);
+    const endParts = secondsToHmsfParts(Number(project.view.loopEnd) || 0, syncFpsPreset.fps);
+    setEditingLoopRange({
+      startHours: String(startParts.hours),
+      startMinutes: String(startParts.minutes),
+      startSeconds: String(startParts.seconds),
+      startFrames: String(startParts.frames),
+      endHours: String(endParts.hours),
+      endMinutes: String(endParts.minutes),
+      endSeconds: String(endParts.seconds),
+      endFrames: String(endParts.frames),
+    });
+  };
+
+  const handleSaveLoopRange = () => {
+    if (!editingLoopRange) return;
+    const length = Math.max(Number(project.view.length) || 0, 0);
+    const minSpan = 1 / Math.max(syncFpsPreset.fps, 1);
+    let start = clamp(
+      hmsfPartsToSeconds(
+        Number(editingLoopRange.startHours) || 0,
+        Number(editingLoopRange.startMinutes) || 0,
+        Number(editingLoopRange.startSeconds) || 0,
+        Number(editingLoopRange.startFrames) || 0,
+        syncFpsPreset.fps
+      ),
+      0,
+      length
+    );
+    let end = clamp(
+      hmsfPartsToSeconds(
+        Number(editingLoopRange.endHours) || 0,
+        Number(editingLoopRange.endMinutes) || 0,
+        Number(editingLoopRange.endSeconds) || 0,
+        Number(editingLoopRange.endFrames) || 0,
+        syncFpsPreset.fps
+      ),
+      0,
+      length
+    );
+    if (end - start < minSpan) {
+      end = clamp(start + minSpan, 0, length);
+      if (end - start < minSpan) {
+        start = clamp(end - minSpan, 0, length);
+      }
+    }
+    dispatch({
+      type: 'update-project',
+      patch: {
+        view: {
+          loopStart: start,
+          loopEnd: end,
+        },
+      },
+    });
+    setEditingLoopRange(null);
   };
 
   const handleAudioClipMove = (trackId, clipStart) => {
@@ -4167,19 +4883,125 @@ export default function App() {
 
   const handleSaveNodeValue = () => {
     if (!editingNode) return;
+    if (editingNode.mode === 'midi-note') {
+      const nodeTime = clamp(
+        hmsfPartsToSeconds(
+          Number(editingNode.noteHours) || 0,
+          Number(editingNode.noteMinutes) || 0,
+          Number(editingNode.noteSeconds) || 0,
+          Number(editingNode.noteFrames) || 0,
+          syncFpsPreset.fps
+        ),
+        0,
+        project.view.length
+      );
+      const noteValue = clamp(Math.round(Number(editingNode.noteValue) || 60), 0, 127);
+      const noteLength = Math.max(Number(editingNode.noteLength) || 0.5, 0.01);
+      dispatch({
+        type: 'update-node',
+        id: editingNode.trackId,
+        nodeId: editingNode.nodeId,
+        patch: {
+          t: nodeTime,
+          v: noteValue,
+          d: noteLength,
+        },
+      });
+      setEditingNode(null);
+      return;
+    }
+    if (editingNode.mode === 'osc-flag') {
+      const track = project.tracks.find((item) => item.id === editingNode.trackId);
+      const nodeTime = clamp(
+        hmsfPartsToSeconds(
+          Number(editingNode.flagHours) || 0,
+          Number(editingNode.flagMinutes) || 0,
+          Number(editingNode.flagSeconds) || 0,
+          Number(editingNode.flagFrames) || 0,
+          syncFpsPreset.fps
+        ),
+        0,
+        project.view.length
+      );
+      const triggerTime = Math.max(Number(editingNode.triggerTime) || 1, 0);
+      const value = Number(editingNode.value);
+      const fallbackAddress = normalizeOscAddressPath(track?.oscAddress, '/osc/flag');
+      const address = normalizeOscAddressPath(editingNode.address, fallbackAddress);
+      dispatch({
+        type: 'update-node',
+        id: editingNode.trackId,
+        nodeId: editingNode.nodeId,
+        patch: {
+          t: nodeTime,
+          d: triggerTime,
+          v: Number.isFinite(value) ? Math.round(value * 100) / 100 : 1,
+          a: address,
+        },
+      });
+      setEditingNode(null);
+      return;
+    }
+    if (editingNode.mode === 'osc-array') {
+      const track = project.tracks.find((item) => item.id === editingNode.trackId);
+      if (!track || track.kind !== 'osc-array') {
+        setEditingNode(null);
+        return;
+      }
+      const nodeTime = clamp(
+        hmsfPartsToSeconds(
+          Number(editingNode.arrayHours) || 0,
+          Number(editingNode.arrayMinutes) || 0,
+          Number(editingNode.arraySeconds) || 0,
+          Number(editingNode.arrayFrames) || 0,
+          syncFpsPreset.fps
+        ),
+        0,
+        project.view.length
+      );
+      const min = Number.isFinite(track.min) ? track.min : 0;
+      const max = Number.isFinite(track.max) ? track.max : 1;
+      const count = getOscArrayValueCount(track);
+      const raw = Array.isArray(editingNode.arrayValues) ? editingNode.arrayValues : [];
+      const nextValues = Array.from({ length: count }, (_, index) => (
+        clamp(Number(raw[index] ?? track.default ?? 0) || 0, min, max)
+      ));
+      dispatch({
+        type: 'update-node',
+        id: editingNode.trackId,
+        nodeId: editingNode.nodeId,
+        patch: {
+          t: nodeTime,
+          v: nextValues[0] ?? track.default ?? 0,
+          arr: nextValues,
+        },
+      });
+      setEditingNode(null);
+      return;
+    }
     if (editingNode.mode === 'color') {
       const track = project.tracks.find((item) => item.id === editingNode.trackId);
       const safeColor = typeof editingNode.color === 'string' && HEX_COLOR_RE.test(editingNode.color)
         ? editingNode.color
         : '#000000';
-      const value = dmxColorHexToValue(track, safeColor);
+      const nodeTime = clamp(
+        hmsfPartsToSeconds(
+          Number(editingNode.colorHours) || 0,
+          Number(editingNode.colorMinutes) || 0,
+          Number(editingNode.colorSeconds) || 0,
+          Number(editingNode.colorFrames) || 0,
+          syncFpsPreset.fps
+        ),
+        0,
+        project.view.length
+      );
+      const value = colorTrackHexToValue(track, safeColor);
       if (Number.isFinite(value)) {
         const rounded = Math.round(value * 100) / 100;
         dispatch({
           type: 'update-node',
           id: editingNode.trackId,
           nodeId: editingNode.nodeId,
-          patch: { v: rounded, c: safeColor.toLowerCase() },
+          patch: { t: nodeTime, v: rounded, c: safeColor.toLowerCase() },
         });
       }
       setEditingNode(null);
@@ -4230,7 +5052,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${project.name || 'osc-daw'}.json`;
+    anchor.download = `${project.name || 'osconductor'}.json`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -4309,7 +5131,15 @@ export default function App() {
       const target = event.target;
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return;
-      if (isSettingsOpen || isHelpOpen || editingNode || editingCue || editingAudioClip || audioChannelMapTrackId) return;
+      if (
+        isSettingsOpen
+        || isHelpOpen
+        || editingNode
+        || editingCue
+        || editingLoopRange
+        || editingAudioClip
+        || audioChannelMapTrackId
+      ) return;
 
       const delta = getWheelDelta(event);
       if (delta === 0) return;
@@ -4328,7 +5158,16 @@ export default function App() {
     return () => {
       window.removeEventListener('wheel', handleWheelZoom);
     };
-  }, [isSettingsOpen, isHelpOpen, editingNode, editingCue, editingAudioClip, audioChannelMapTrackId, playhead]);
+  }, [
+    isSettingsOpen,
+    isHelpOpen,
+    editingNode,
+    editingCue,
+    editingLoopRange,
+    editingAudioClip,
+    audioChannelMapTrackId,
+    playhead,
+  ]);
 
   const currentTime = useMemo(
     () => formatHmsfTimecode(playhead, syncFpsPreset.fps),
@@ -4391,12 +5230,86 @@ export default function App() {
       return clamp(value, 1, audioMapOutputChannelCount);
     });
   }, [audioChannelMapDraft, audioChannelMapTrack, audioMapSourceChannels, audioMapOutputChannelCount]);
+  const oscOutputs = useMemo(
+    () => normalizeOscOutputsForUi(project.osc),
+    [project.osc]
+  );
+  const defaultOscOutput = oscOutputs[0] || {
+    id: DEFAULT_OSC_OUTPUT_ID,
+    name: 'Main',
+    host: '127.0.0.1',
+    port: 9000,
+  };
+  const oscOutputOptions = useMemo(
+    () => oscOutputs.map((output) => ({
+      id: output.id,
+      name: output.name,
+      host: output.host,
+      port: output.port,
+      label: `${output.name} (${output.host}:${output.port})`,
+    })),
+    [oscOutputs]
+  );
+  const oscOutputLabelMap = useMemo(() => {
+    const map = new Map();
+    oscOutputs.forEach((output) => {
+      map.set(output.id, `${output.name} (${output.host}:${output.port})`);
+    });
+    return map;
+  }, [oscOutputs]);
+  const updateOscOutputs = useCallback((nextOutputs) => {
+    const normalized = normalizeOscOutputsForUi({ outputs: nextOutputs });
+    dispatch({
+      type: 'update-project',
+      patch: {
+        osc: {
+          outputs: normalized,
+          host: normalized[0]?.host || '127.0.0.1',
+          port: normalized[0]?.port || 9000,
+        },
+      },
+    });
+  }, []);
+  const addOscOutput = useCallback(() => {
+    const last = oscOutputs[oscOutputs.length - 1] || defaultOscOutput;
+    const nextIndex = oscOutputs.length + 1;
+    let nextPort = clamp((Number(last.port) || 9000) + 1, 1, 65535);
+    if (nextPort === DEV_SERVER_PORT) {
+      nextPort = clamp(nextPort + 1, 1, 65535);
+    }
+    updateOscOutputs([
+      ...oscOutputs,
+      {
+        id: `osc-out-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+        name: normalizeOscOutputName('', nextIndex - 1),
+        host: last.host || '127.0.0.1',
+        port: nextPort,
+      },
+    ]);
+  }, [defaultOscOutput, oscOutputs, updateOscOutputs]);
+  const removeOscOutput = useCallback((outputId) => {
+    if (!outputId) return;
+    const filtered = oscOutputs.filter((output) => output.id !== outputId);
+    if (!filtered.length) return;
+    updateOscOutputs(filtered);
+  }, [oscOutputs, updateOscOutputs]);
+  const patchOscOutput = useCallback((outputId, patch) => {
+    if (!outputId) return;
+    updateOscOutputs(
+      oscOutputs.map((output) => (
+        output.id === outputId ? { ...output, ...patch } : output
+      ))
+    );
+  }, [oscOutputs, updateOscOutputs]);
   const oscPortConflict = useMemo(() => ({
-    port: Number(project.osc?.port) === DEV_SERVER_PORT,
+    outputs: oscOutputs.map((output) => Number(output.port) === DEV_SERVER_PORT),
     listenPort: Number(project.osc?.listenPort) === DEV_SERVER_PORT,
     controlPort: Number(project.osc?.controlPort) === DEV_SERVER_PORT,
-  }), [project.osc?.port, project.osc?.listenPort, project.osc?.controlPort]);
-  const hasOscPortConflict = oscPortConflict.port || oscPortConflict.listenPort || oscPortConflict.controlPort;
+  }), [oscOutputs, project.osc?.listenPort, project.osc?.controlPort]);
+  const hasOscPortConflict =
+    oscPortConflict.outputs.some(Boolean)
+    || oscPortConflict.listenPort
+    || oscPortConflict.controlPort;
   const canUndo = (historyPast?.length ?? 0) > 0;
   const canRedo = (historyFuture?.length ?? 0) > 0;
   const multiAddCount = Math.floor(Number(multiAddDialog?.count));
@@ -4556,21 +5469,28 @@ export default function App() {
     });
   };
 
-  const openMultiAddDialog = (kind) => {
+  const openMultiAddDialog = (kind, overrides = {}) => {
     setIsAddTrackMenuOpen(false);
-    const safeKind = kind === 'audio' || kind === 'midi' || kind === 'dmx' || kind === 'dmx-color'
+    const safeKind = kind === 'audio'
+      || kind === 'midi'
+      || kind === 'midi-note'
+      || kind === 'dmx'
+      || kind === 'dmx-color'
+      || kind === 'osc-array'
+      || kind === 'osc-color'
+      || kind === 'osc-flag'
       ? kind
       : 'osc';
     const selectedMidiOutputId =
       typeof project.midi?.outputId === 'string' && project.midi.outputId
         ? project.midi.outputId
         : VIRTUAL_MIDI_OUTPUT_ID;
-    setMultiAddDialog({
+    const baseDialog = {
       kind: safeKind,
       count: '4',
+      singleAdd: false,
       midiOutputId: selectedMidiOutputId,
       midiChannel: '1',
-      midiMode: 'cc',
       midiStart: '1',
       dmxHost: '127.0.0.1',
       dmxUniverse: '0',
@@ -4578,6 +5498,13 @@ export default function App() {
       dmxColorFixtureType: 'rgb',
       dmxColorMappingChannels: '4',
       dmxColorInterval: '3',
+      oscArrayValueCount: '5',
+    };
+    setMultiAddDialog({
+      ...baseDialog,
+      ...overrides,
+      count: typeof overrides.count === 'string' ? overrides.count : baseDialog.count,
+      singleAdd: Boolean(overrides.singleAdd),
     });
   };
 
@@ -4586,8 +5513,12 @@ export default function App() {
     const safeKind =
       multiAddDialog.kind === 'audio'
       || multiAddDialog.kind === 'midi'
+      || multiAddDialog.kind === 'midi-note'
       || multiAddDialog.kind === 'dmx'
       || multiAddDialog.kind === 'dmx-color'
+      || multiAddDialog.kind === 'osc-array'
+      || multiAddDialog.kind === 'osc-color'
+      || multiAddDialog.kind === 'osc-flag'
         ? multiAddDialog.kind
         : 'osc';
     const count = clamp(multiAddCount, 1, 256);
@@ -4669,19 +5600,57 @@ export default function App() {
           ? multiAddDialog.midiOutputId
           : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID);
       const channel = clamp(Math.round(Number(multiAddDialog.midiChannel) || 1), 1, 16);
-      const mode = multiAddDialog.midiMode === 'note' ? 'note' : 'cc';
       const startValue = clamp(Math.round(Number(multiAddDialog.midiStart) || 0), 0, 127);
       const items = Array.from({ length: count }, (_, index) => {
         const value = clamp(startValue + index, 0, 127);
         return {
           kind: 'midi',
           options: {
-            midi: mode === 'note'
-              ? { outputId, channel, mode, note: value }
-              : { outputId, channel, mode, controlNumber: value },
+            midi: { outputId, channel, controlNumber: value },
           },
         };
       });
+      dispatch({ type: 'add-tracks', items });
+      setMultiAddDialog(null);
+      return;
+    }
+
+    if (safeKind === 'midi-note') {
+      const outputId =
+        typeof multiAddDialog.midiOutputId === 'string' && multiAddDialog.midiOutputId
+          ? multiAddDialog.midiOutputId
+          : (project.midi?.outputId || VIRTUAL_MIDI_OUTPUT_ID);
+      const channel = clamp(Math.round(Number(multiAddDialog.midiChannel) || 1), 1, 16);
+      const startNote = clamp(Math.round(Number(multiAddDialog.midiStart) || 60), 0, 127);
+      const items = Array.from({ length: count }, (_, index) => {
+        const note = clamp(startNote + index, 0, 127);
+        return {
+          kind: 'midi-note',
+          options: {
+            midi: { outputId, channel, note },
+          },
+        };
+      });
+      dispatch({ type: 'add-tracks', items });
+      setMultiAddDialog(null);
+      return;
+    }
+
+    if (safeKind === 'osc-array') {
+      const valueCount = clamp(Math.round(Number(multiAddDialog.oscArrayValueCount) || 5), 1, 20);
+      if (multiAddDialog.singleAdd) {
+        dispatch({
+          type: 'add-track',
+          kind: 'osc-array',
+          options: { oscArray: { valueCount } },
+        });
+        setMultiAddDialog(null);
+        return;
+      }
+      const items = Array.from({ length: count }, () => ({
+        kind: 'osc-array',
+        options: { oscArray: { valueCount } },
+      }));
       dispatch({ type: 'add-tracks', items });
       setMultiAddDialog(null);
       return;
@@ -4702,8 +5671,10 @@ export default function App() {
         currentTime={currentTime}
         isPlaying={isPlaying}
         isRecording={isRecording}
+        isLoopEnabled={Boolean(project.view.loopEnabled)}
         onPlayToggle={handlePlayToggle}
         onRecordToggle={handleRecordToggle}
+        onLoopToggle={handleLoopToggle}
         onStop={handleStop}
         onStopLocate={handleLocate}
         onSave={handleSave}
@@ -4719,6 +5690,7 @@ export default function App() {
         onToggleCompositions={handleToggleCompositions}
         onToggleInspector={handleToggleInspector}
         onOpenSettings={openSettings}
+        onTimecodeCommit={handleTimecodeCommit}
       />
 
       {isHelpOpen && (
@@ -4742,7 +5714,8 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Backspace / Delete</kbd><span>Delete selected node(s), or selected track(s)</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + O</kbd><span>Add OSC track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + A</kbd><span>Add Audio track</span></div>
-                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + M</kbd><span>Add MIDI track</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + M</kbd><span>Add MIDI CC track</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + M</kbd><span>Add MIDI Note track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + D</kbd><span>Add DMX track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + D</kbd><span>Add DMX Color track</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + C</kbd><span>Copy selected track(s), or selected node(s)</span></div>
@@ -4750,33 +5723,41 @@ export default function App() {
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Z</kbd><span>Undo</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Shift + Z</kbd><span>Redo</span></div>
                 <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + Y</kbd><span>Redo (alternative)</span></div>
+                <div className="help-shortcuts__row"><kbd>Cmd/Ctrl + = / -</kbd><span>Zoom timeline in / out</span></div>
+                <div className="help-shortcuts__row"><kbd>Shift + Alt/Option + Wheel</kbd><span>Zoom T</span></div>
+                <div className="help-shortcuts__row"><kbd>Shift + Ctrl + Wheel</kbd><span>Zoom H</span></div>
                 <div className="help-shortcuts__row"><kbd>Enter (Audio Channel Map)</kbd><span>Save map and jump to next Audio track</span></div>
                 <div className="help-shortcuts__row"><kbd>↓ (Audio Channel Map)</kbd><span>Save map and jump to next Audio track</span></div>
-                <div className="help-shortcuts__row"><kbd>Top Bar: Comps</kbd><span>Show / Hide compositions panel</span></div>
-                <div className="help-shortcuts__row"><kbd>Top Bar: Inspector</kbd><span>Show / Hide inspector panel</span></div>
-                <div className="help-shortcuts__row"><kbd>Esc</kbd><span>Close this help dialog</span></div>
+                <div className="help-shortcuts__row"><kbd>Enter (Track Name)</kbd><span>Save and jump to next selected track name</span></div>
+                <div className="help-shortcuts__row"><kbd>Enter (Timecode)</kbd><span>Jump playhead to typed hh:mm:ss.ff</span></div>
+                <div className="help-shortcuts__row"><kbd>Esc (Timecode)</kbd><span>Cancel timecode edit</span></div>
+                <div className="help-shortcuts__row"><kbd>Esc</kbd><span>Close active dialog / cancel current edit</span></div>
               </div>
 
               <div className="help-shortcuts__section">
                 <div className="help-shortcuts__title">Mouse Controls</div>
+                <div className="help-shortcuts__row"><kbd>Top Bar: Comps</kbd><span>Show / Hide compositions panel</span></div>
+                <div className="help-shortcuts__row"><kbd>Top Bar: Inspector</kbd><span>Show / Hide inspector panel</span></div>
+                <div className="help-shortcuts__row"><kbd>Top Bar: ↺</kbd><span>Toggle timeline loop mode</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click Stop (■)</kbd><span>Locate playhead to 00:00:00.00</span></div>
                 <div className="help-shortcuts__row"><kbd>Double Click Timeline</kbd><span>Add cue at clicked time</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Cue</kbd><span>Move cue time</span></div>
                 <div className="help-shortcuts__row"><kbd>Right Click Cue</kbd><span>Edit or delete cue</span></div>
                 <div className="help-shortcuts__row"><kbd>Double Click Composition</kbd><span>Rename composition</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Composition</kbd><span>Reorder compositions</span></div>
                 <div className="help-shortcuts__row"><kbd>Alt/Option + Click Track +</kbd><span>Open Multi Add menu (add multiple tracks)</span></div>
-                <div className="help-shortcuts__row"><kbd>Double Click Node</kbd><span>Edit node value / color</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click Node</kbd><span>Edit node value / color (OSC Flag: time + address + value)</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Node</kbd><span>Move node in time/value</span></div>
                 <div className="help-shortcuts__row"><kbd>Alt/Option + Drag Node</kbd><span>Snap node to nearest cue</span></div>
                 <div className="help-shortcuts__row"><kbd>Drag Audio Clip</kbd><span>Move clip start time on timeline</span></div>
                 <div className="help-shortcuts__row"><kbd>Alt/Option + Drag Audio Clip</kbd><span>Snap clip start to nearest cue</span></div>
                 <div className="help-shortcuts__row"><kbd>Double Click Audio Clip</kbd><span>Edit clip start time</span></div>
+                <div className="help-shortcuts__row"><kbd>Drag ◣ / ◢</kbd><span>Set loop start / end range</span></div>
+                <div className="help-shortcuts__row"><kbd>Double Click ◣ / ◢</kbd><span>Edit loop range with exact hh:mm:ss.ff</span></div>
                 <div className="help-shortcuts__row"><kbd>Right Click Node</kbd><span>Change node curve mode</span></div>
                 <div className="help-shortcuts__row"><kbd>Color Swatch</kbd><span>Apply color to selected track group</span></div>
                 <div className="help-shortcuts__row"><kbd>Shift + Click Track</kbd><span>Select track range (anchor to clicked track)</span></div>
                 <div className="help-shortcuts__row"><kbd>Ctrl/Cmd + Click Track</kbd><span>Toggle individual track selection</span></div>
-                <div className="help-shortcuts__row"><kbd>Shift + Alt/Option + Wheel</kbd><span>Zoom T</span></div>
-                <div className="help-shortcuts__row"><kbd>Shift + Ctrl + Wheel</kbd><span>Zoom H</span></div>
               </div>
 
               <div className="help-shortcuts__section">
@@ -4790,15 +5771,16 @@ export default function App() {
                 <div className="help-shortcuts__title">OSC Remote Control</div>
                 <div className="help-shortcuts__row"><kbd>Settings &gt; OSC &gt; OSC Control Port</kbd><span>Set incoming control port</span></div>
                 <div className="help-shortcuts__row"><kbd>Composition index</kbd><span>1-based order in the Compositions panel</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/5/select</kbd><span>Switch to Composition #5</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/rec 1</kbd><span>Switch to Composition #1 + REC On</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/rec 0</kbd><span>Switch to Composition #1 + REC Off</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/play 1</kbd><span>Switch to Composition #1 + Play On</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/play 0</kbd><span>Switch to Composition #1 + Play Off</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/stop 1</kbd><span>Switch to Composition #1 + Stop + locate 00:00:00.00</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/cue 10</kbd><span>Switch to Composition #1 + jump to cue #10</span></div>
-                <div className="help-shortcuts__row"><kbd>/OSCDAW/Composition/1/cue/10</kbd><span>Alternative cue path format</span></div>
-                <div className="help-shortcuts__row"><kbd>Legacy: /OSCDAW/rec|play|stop|cue</kbd><span>Still supported</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/5/select</kbd><span>Switch to Composition #5</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/rec 1</kbd><span>Switch to Composition #1 + REC On</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/rec 0</kbd><span>Switch to Composition #1 + REC Off</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/play 1</kbd><span>Switch to Composition #1 + Play On</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/play 0</kbd><span>Switch to Composition #1 + Play Off</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/stop 1</kbd><span>Switch to Composition #1 + Stop + locate 00:00:00.00</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/loop 1</kbd><span>Switch to Composition #1 + Loop On</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/loop 0</kbd><span>Switch to Composition #1 + Loop Off</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/cue 10</kbd><span>Switch to Composition #1 + jump to cue #10</span></div>
+                <div className="help-shortcuts__row"><kbd>/OSConductor/Composition/1/cue/10</kbd><span>Alternative cue path format</span></div>
               </div>
 
               <div className="help-shortcuts__section help-shortcuts__section--brand">
@@ -5039,39 +6021,53 @@ export default function App() {
                   <div className="settings-section">
                   <div className="settings-section__title">OSC Settings</div>
                   <div className="field">
-                    <label>OSC Host</label>
-                    <input
-                      className="input"
-                      value={project.osc?.host ?? ''}
-                      onChange={(event) =>
-                        dispatch({
-                          type: 'update-project',
-                          patch: { osc: { host: event.target.value } },
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label>OSC Port</label>
-                    <NumberInput
-                      className="input"
-                     
-                      min="1"
-                      max="65535"
-                      step="1"
-                      value={Number.isFinite(project.osc?.port) ? project.osc.port : 1}
-                      onChange={(event) =>
-                        dispatch({
-                          type: 'update-project',
-                          patch: { osc: { port: Number(event.target.value) || 1 } },
-                        })
-                      }
-                    />
-                    {oscPortConflict.port && (
-                      <div className="field__hint field__hint--warn">
-                        Port 5170 is reserved by Vite dev server. Please choose a different OSC port.
-                      </div>
-                    )}
+                    <label>OSC Outputs</label>
+                    <div className="settings-osc-outputs">
+                      {oscOutputs.map((output, index) => (
+                        <div key={output.id} className="settings-osc-output">
+                          <div className="settings-osc-output__row">
+                            <input
+                              className="input"
+                              value={output.name}
+                              placeholder={normalizeOscOutputName('', index)}
+                              onChange={(event) => patchOscOutput(output.id, { name: event.target.value })}
+                            />
+                            <input
+                              className="input input--mono"
+                              value={output.host}
+                              placeholder="127.0.0.1"
+                              onChange={(event) => patchOscOutput(output.id, { host: event.target.value })}
+                            />
+                            <NumberInput
+                              className="input"
+                              min="1"
+                              max="65535"
+                              step="1"
+                              value={output.port}
+                              onChange={(event) => patchOscOutput(output.id, { port: Number(event.target.value) || 1 })}
+                            />
+                            <button
+                              className="btn btn--ghost btn--tiny"
+                              onClick={() => removeOscOutput(output.id)}
+                              disabled={oscOutputs.length <= 1}
+                              title="Delete output"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          {oscPortConflict.outputs[index] && (
+                            <div className="field__hint field__hint--warn">
+                              Port 5170 is reserved by Vite dev server. Please choose a different OSC output port.
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="settings-osc-outputs__actions">
+                      <button className="btn btn--ghost btn--tiny" onClick={addOscOutput}>
+                        Add OSC Output
+                      </button>
+                    </div>
                   </div>
                   <div className="field">
                     <label>OSC Listening Port</label>
@@ -5081,7 +6077,7 @@ export default function App() {
                       min="1"
                       max="65535"
                       step="1"
-                      value={Number.isFinite(project.osc?.listenPort) ? project.osc.listenPort : 9001}
+                      value={Number.isFinite(project.osc?.listenPort) ? project.osc.listenPort : 8999}
                       onChange={(event) =>
                         dispatch({
                           type: 'update-project',
@@ -5106,7 +6102,7 @@ export default function App() {
                       min="1"
                       max="65535"
                       step="1"
-                      value={Number.isFinite(project.osc?.controlPort) ? project.osc.controlPort : 9002}
+                      value={Number.isFinite(project.osc?.controlPort) ? project.osc.controlPort : 8998}
                       onChange={(event) =>
                         dispatch({
                           type: 'update-project',
@@ -5122,7 +6118,7 @@ export default function App() {
                   </div>
                   {hasOscPortConflict && (
                     <div className="field__hint field__hint--warn">
-                      OSC ports must not use 5170.
+                      OSC output / listen / control ports must not use 5170.
                     </div>
                   )}
                   </div>
@@ -5261,8 +6257,16 @@ export default function App() {
               <div className="label">
                 {multiAddDialog.kind === 'audio'
                   ? 'Add Multi Audio'
-                  : multiAddDialog.kind === 'midi'
-                    ? 'Add Multi MIDI'
+                    : multiAddDialog.kind === 'midi'
+                      ? 'Add Multi MIDI CC'
+                    : multiAddDialog.kind === 'midi-note'
+                      ? 'Add Multi MIDI Note'
+                    : multiAddDialog.kind === 'osc-array'
+                      ? (multiAddDialog.singleAdd ? 'Add OSC Array' : 'Add Multi OSC Array')
+                    : multiAddDialog.kind === 'osc-color'
+                      ? 'Add Multi OSC Color'
+                    : multiAddDialog.kind === 'osc-flag'
+                      ? 'Add Multi OSC Flag'
                     : multiAddDialog.kind === 'dmx'
                       ? 'Add Multi DMX'
                       : multiAddDialog.kind === 'dmx-color'
@@ -5271,28 +6275,29 @@ export default function App() {
               </div>
             </div>
             <div className="modal__content">
-              <div className="field">
-                <label>Track Count</label>
-                <NumberInput
-                  className="input"
-                 
-                  min="1"
-                  max="256"
-                  step="1"
-                  value={multiAddDialog.count}
-                  onChange={(event) =>
-                    setMultiAddDialog({
-                      ...multiAddDialog,
-                      count: event.target.value,
-                    })
-                  }
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return;
-                    event.preventDefault();
-                    handleConfirmMultiAdd();
-                  }}
-                />
-              </div>
+              {!multiAddDialog.singleAdd && (
+                <div className="field">
+                  <label>Track Count</label>
+                  <NumberInput
+                    className="input"
+                    min="1"
+                    max="256"
+                    step="1"
+                    value={multiAddDialog.count}
+                    onChange={(event) =>
+                      setMultiAddDialog({
+                        ...multiAddDialog,
+                        count: event.target.value,
+                      })
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter') return;
+                      event.preventDefault();
+                      handleConfirmMultiAdd();
+                    }}
+                  />
+                </div>
+              )}
               {(multiAddDialog.kind === 'dmx' || multiAddDialog.kind === 'dmx-color') && (
                 <>
                   <div className="field">
@@ -5415,7 +6420,27 @@ export default function App() {
                   </div>
                 </>
               )}
-              {multiAddDialog.kind === 'midi' && (
+              {multiAddDialog.kind === 'osc-array' && (
+                <div className="field">
+                  <label>Array Values Per Node</label>
+                  <NumberInput
+                    className="input"
+                    min="1"
+                    max="20"
+                    step="1"
+                    value={multiAddDialog.oscArrayValueCount}
+                    onChange={(event) =>
+                      setMultiAddDialog({
+                        ...multiAddDialog,
+                        oscArrayValueCount: String(
+                          clamp(Math.round(Number(event.target.value) || 1), 1, 20)
+                        ),
+                      })
+                    }
+                  />
+                </div>
+              )}
+              {(multiAddDialog.kind === 'midi' || multiAddDialog.kind === 'midi-note') && (
                 <>
                   <div className="field">
                     <label>MIDI Out Port</label>
@@ -5458,24 +6483,9 @@ export default function App() {
                         }
                       />
                     </div>
-                    <div className="field">
-                      <label>Type</label>
-                      <select
-                        className="input"
-                        value={multiAddDialog.midiMode === 'note' ? 'note' : 'cc'}
-                        onChange={(event) =>
-                          setMultiAddDialog({
-                            ...multiAddDialog,
-                            midiMode: event.target.value === 'note' ? 'note' : 'cc',
-                          })}
-                      >
-                        <option value="note">Note On/Off</option>
-                        <option value="cc">Control Change (CC)</option>
-                      </select>
-                    </div>
                   </div>
                   <div className="field">
-                    <label>{multiAddDialog.midiMode === 'note' ? 'Start Note' : 'Start CC'}</label>
+                    <label>{multiAddDialog.kind === 'midi-note' ? 'Start Note' : 'Start CC'}</label>
                     <NumberInput
                       className="input"
                      
@@ -5492,9 +6502,9 @@ export default function App() {
                     />
                   </div>
                   <div className="field__hint">
-                    {multiAddDialog.midiMode === 'note'
-                      ? 'Notes will auto-increment by track.'
-                      : 'CC numbers will auto-increment by track.'}
+                    {multiAddDialog.kind === 'midi-note'
+                      ? 'MIDI note numbers will auto-increment by track.'
+                      : 'MIDI CC numbers will auto-increment by track.'}
                   </div>
                 </>
               )}
@@ -5614,28 +6624,293 @@ export default function App() {
           <div className="modal__card">
             <div className="modal__header">
               <div className="label">
-                {editingNode.mode === 'color' ? 'Edit Node Color' : 'Edit Node Value'}
+                {editingNode.mode === 'color'
+                  ? 'Edit Node Color'
+                  : (editingNode.mode === 'osc-flag'
+                    ? 'Edit OSC Flag Node'
+                    : (editingNode.mode === 'osc-array'
+                      ? 'Edit OSC Array Node'
+                      : (editingNode.mode === 'midi-note' ? 'Edit MIDI Note Node' : 'Edit Node Value')))}
               </div>
               <button className="btn btn--ghost" onClick={() => setEditingNode(null)}>Close</button>
             </div>
             <div className="modal__content">
               {editingNode.mode === 'color' ? (
-                <div className="field">
-                  <label>Color</label>
-                  <InlineColorPicker
-                    value={
-                      typeof editingNode.color === 'string' && HEX_COLOR_RE.test(editingNode.color)
-                        ? editingNode.color
-                        : '#000000'
-                    }
-                    onChange={(nextColor) => {
-                      setEditingNode((prev) => {
-                        if (!prev) return prev;
-                        return { ...prev, color: String(nextColor || '#000000').toLowerCase() };
-                      });
-                    }}
-                  />
-                </div>
+                <>
+                  <div className="field">
+                    <label>Node Time (hh:mm:ss.ff)</label>
+                    <div className="field-grid field-grid--quad">
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="hh"
+                        value={editingNode.colorHours}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, colorHours: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="mm"
+                        value={editingNode.colorMinutes}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, colorMinutes: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max="59"
+                        step="1"
+                        placeholder="ss"
+                        value={editingNode.colorSeconds}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, colorSeconds: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                        step="1"
+                        placeholder="ff"
+                        value={editingNode.colorFrames}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, colorFrames: event.target.value } : prev))}
+                      />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>Color</label>
+                    <InlineColorPicker
+                      value={
+                        typeof editingNode.color === 'string' && HEX_COLOR_RE.test(editingNode.color)
+                          ? editingNode.color
+                          : '#000000'
+                      }
+                      onChange={(nextColor) => {
+                        setEditingNode((prev) => {
+                          if (!prev) return prev;
+                          return { ...prev, color: String(nextColor || '#000000').toLowerCase() };
+                        });
+                      }}
+                    />
+                  </div>
+                </>
+              ) : editingNode.mode === 'osc-array' ? (
+                <>
+                  <div className="field">
+                    <label>Node Time (hh:mm:ss.ff)</label>
+                    <div className="field-grid field-grid--quad">
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="hh"
+                        value={editingNode.arrayHours}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, arrayHours: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="mm"
+                        value={editingNode.arrayMinutes}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, arrayMinutes: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max="59"
+                        step="1"
+                        placeholder="ss"
+                        value={editingNode.arraySeconds}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, arraySeconds: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                        step="1"
+                        placeholder="ff"
+                        value={editingNode.arrayFrames}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, arrayFrames: event.target.value } : prev))}
+                      />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>Array Values</label>
+                    <div className="field-grid field-grid--quad">
+                      {(Array.isArray(editingNode.arrayValues) ? editingNode.arrayValues : []).map((item, index) => (
+                        <div className="field" key={`osc-array-value-${index + 1}`}>
+                          <label>{`Index ${index + 1}`}</label>
+                          <NumberInput
+                            className="input"
+                            step="0.01"
+                            value={item}
+                            onChange={(event) => {
+                              setEditingNode((prev) => {
+                                if (!prev) return prev;
+                                const nextValues = Array.isArray(prev.arrayValues) ? [...prev.arrayValues] : [];
+                                nextValues[index] = event.target.value;
+                                return { ...prev, arrayValues: nextValues };
+                              });
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : editingNode.mode === 'osc-flag' ? (
+                <>
+                  <div className="field">
+                    <label>Flag Time (hh:mm:ss.ff)</label>
+                    <div className="field-grid field-grid--quad">
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="hh"
+                        value={editingNode.flagHours}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, flagHours: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="mm"
+                        value={editingNode.flagMinutes}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, flagMinutes: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max="59"
+                        step="1"
+                        placeholder="ss"
+                        value={editingNode.flagSeconds}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, flagSeconds: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                        step="1"
+                        placeholder="ff"
+                        value={editingNode.flagFrames}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, flagFrames: event.target.value } : prev))}
+                      />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>OSC Address</label>
+                    <input
+                      className="input input--mono"
+                      value={editingNode.address ?? ''}
+                      onChange={(event) =>
+                        setEditingNode((prev) => (prev ? { ...prev, address: event.target.value } : prev))}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Trigger Value</label>
+                    <NumberInput
+                      className="input"
+                      step="0.01"
+                      value={editingNode.value}
+                      onChange={(event) =>
+                        setEditingNode((prev) => (prev ? { ...prev, value: event.target.value } : prev))}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Trigger Time (sec)</label>
+                    <NumberInput
+                      className="input"
+                      min="0"
+                      step="0.01"
+                      value={editingNode.triggerTime}
+                      onChange={(event) =>
+                        setEditingNode((prev) => (prev ? { ...prev, triggerTime: event.target.value } : prev))}
+                    />
+                  </div>
+                </>
+              ) : editingNode.mode === 'midi-note' ? (
+                <>
+                  <div className="field">
+                    <label>Note Time (hh:mm:ss.ff)</label>
+                    <div className="field-grid field-grid--quad">
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="hh"
+                        value={editingNode.noteHours}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, noteHours: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        step="1"
+                        placeholder="mm"
+                        value={editingNode.noteMinutes}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, noteMinutes: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max="59"
+                        step="1"
+                        placeholder="ss"
+                        value={editingNode.noteSeconds}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, noteSeconds: event.target.value } : prev))}
+                      />
+                      <NumberInput
+                        className="input"
+                        min="0"
+                        max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                        step="1"
+                        placeholder="ff"
+                        value={editingNode.noteFrames}
+                        onChange={(event) =>
+                          setEditingNode((prev) => (prev ? { ...prev, noteFrames: event.target.value } : prev))}
+                      />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>{`MIDI Note (0-127) · ${formatMidiNoteLabel(editingNode.noteValue)}`}</label>
+                    <NumberInput
+                      className="input"
+                      min="0"
+                      max="127"
+                      step="1"
+                      value={editingNode.noteValue}
+                      onChange={(event) =>
+                        setEditingNode((prev) => (prev ? { ...prev, noteValue: event.target.value } : prev))}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Length (sec)</label>
+                    <NumberInput
+                      className="input"
+                      min="0.01"
+                      step="0.01"
+                      value={editingNode.noteLength}
+                      onChange={(event) =>
+                        setEditingNode((prev) => (prev ? { ...prev, noteLength: event.target.value } : prev))}
+                    />
+                  </div>
+                </>
               ) : (
                 <div className="field">
                   <label>Value</label>
@@ -5725,6 +7000,142 @@ export default function App() {
               <div className="modal__actions">
                 <button className="btn" onClick={handleSaveCueTime}>Save</button>
                 <button className="btn btn--ghost" onClick={() => setEditingCue(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingLoopRange && (
+        <div className="modal" role="dialog" aria-modal="true">
+          <div className="modal__card">
+            <div className="modal__header">
+              <div className="label">Edit Loop Range</div>
+            </div>
+            <div className="modal__content">
+              <div className="field">
+                <label>Start (hh:mm:ss.ff)</label>
+                <div className="field-grid field-grid--quad">
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    step="1"
+                    placeholder="hh"
+                    value={editingLoopRange.startHours}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        startHours: event.target.value,
+                      })
+                    }
+                  />
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    max="59"
+                    step="1"
+                    placeholder="mm"
+                    value={editingLoopRange.startMinutes}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        startMinutes: event.target.value,
+                      })
+                    }
+                  />
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    max="59"
+                    step="1"
+                    placeholder="ss"
+                    value={editingLoopRange.startSeconds}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        startSeconds: event.target.value,
+                      })
+                    }
+                  />
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                    step="1"
+                    placeholder="ff"
+                    value={editingLoopRange.startFrames}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        startFrames: event.target.value,
+                      })
+                    }
+                  />
+                </div>
+              </div>
+              <div className="field">
+                <label>End (hh:mm:ss.ff)</label>
+                <div className="field-grid field-grid--quad">
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    step="1"
+                    placeholder="hh"
+                    value={editingLoopRange.endHours}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        endHours: event.target.value,
+                      })
+                    }
+                  />
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    max="59"
+                    step="1"
+                    placeholder="mm"
+                    value={editingLoopRange.endMinutes}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        endMinutes: event.target.value,
+                      })
+                    }
+                  />
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    max="59"
+                    step="1"
+                    placeholder="ss"
+                    value={editingLoopRange.endSeconds}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        endSeconds: event.target.value,
+                      })
+                    }
+                  />
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    max={Math.max(Math.round(syncFpsPreset.fps) - 1, 0)}
+                    step="1"
+                    placeholder="ff"
+                    value={editingLoopRange.endFrames}
+                    onChange={(event) =>
+                      setEditingLoopRange({
+                        ...editingLoopRange,
+                        endFrames: event.target.value,
+                      })
+                    }
+                  />
+                </div>
+              </div>
+              <div className="modal__actions">
+                <button className="btn" onClick={handleSaveLoopRange}>Save</button>
+                <button className="btn btn--ghost" onClick={() => setEditingLoopRange(null)}>Cancel</button>
               </div>
             </div>
           </div>
@@ -5938,7 +7349,45 @@ export default function App() {
         <div className="tracks-pane">
           <aside className="track-list track-list--header">
             <div className="panel-header track-list-header-panel">
-              <div className="track-header-row">
+              <div className="track-header-row track-header-row--cue">
+                <div className="track-cue-controls">
+                  <span className="timeline-controls__label">Cue</span>
+                  <div className="timeline-controls__buttons timeline-controls__buttons--cue">
+                    <button
+                      className="btn btn--unit"
+                      onClick={() => handleCueStep(-1)}
+                      disabled={!project.cues?.length}
+                      title="Jump to previous cue"
+                    >
+                      {'<'}
+                    </button>
+                    <button
+                      className="btn btn--unit"
+                      onClick={() => handleCueStep(1)}
+                      disabled={!project.cues?.length}
+                      title="Jump to next cue"
+                    >
+                      {'>'}
+                    </button>
+                    <button
+                      className="btn btn--unit"
+                      onClick={handleCueAddAtPlayhead}
+                      title="Add cue at playhead"
+                    >
+                      +
+                    </button>
+                    <button
+                      className="btn btn--unit"
+                      onClick={handleCueDeleteAtPlayhead}
+                      disabled={!project.cues?.length}
+                      title="Delete cue at playhead"
+                    >
+                      -
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="track-header-row track-header-row--actions">
                 <div className="label">Tracks</div>
                 <div className="tracks-actions">
                   <div className="tracks-add-wrap">
@@ -5982,6 +7431,47 @@ export default function App() {
                           className="tracks-add-menu__item"
                           onClick={() => {
                             if (addTrackMenuMode === 'multi') {
+                              openMultiAddDialog('osc-flag');
+                              return;
+                            }
+                            dispatch({ type: 'add-track', kind: 'osc-flag' });
+                            setIsAddTrackMenuOpen(false);
+                          }}
+                        >
+                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC Flag' : 'Add OSC Flag'}
+                        </button>
+                        <button
+                          className="tracks-add-menu__item"
+                          onClick={() => {
+                            if (addTrackMenuMode === 'multi') {
+                              openMultiAddDialog('osc-array');
+                              return;
+                            }
+                            openMultiAddDialog('osc-array', {
+                              count: '1',
+                              singleAdd: true,
+                            });
+                          }}
+                        >
+                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC Array' : 'Add OSC Array'}
+                        </button>
+                        <button
+                          className="tracks-add-menu__item"
+                          onClick={() => {
+                            if (addTrackMenuMode === 'multi') {
+                              openMultiAddDialog('osc-color');
+                              return;
+                            }
+                            dispatch({ type: 'add-track', kind: 'osc-color' });
+                            setIsAddTrackMenuOpen(false);
+                          }}
+                        >
+                          {addTrackMenuMode === 'multi' ? 'Add Multi OSC Color' : 'Add OSC Color'}
+                        </button>
+                        <button
+                          className="tracks-add-menu__item"
+                          onClick={() => {
+                            if (addTrackMenuMode === 'multi') {
                               openMultiAddDialog('audio');
                               return;
                             }
@@ -6002,7 +7492,20 @@ export default function App() {
                             setIsAddTrackMenuOpen(false);
                           }}
                         >
-                          {addTrackMenuMode === 'multi' ? 'Add Multi MIDI' : 'Add MIDI'}
+                          {addTrackMenuMode === 'multi' ? 'Add Multi MIDI CC' : 'Add MIDI CC'}
+                        </button>
+                        <button
+                          className="tracks-add-menu__item"
+                          onClick={() => {
+                            if (addTrackMenuMode === 'multi') {
+                              openMultiAddDialog('midi-note');
+                              return;
+                            }
+                            dispatch({ type: 'add-track', kind: 'midi-note' });
+                            setIsAddTrackMenuOpen(false);
+                          }}
+                        >
+                          {addTrackMenuMode === 'multi' ? 'Add Multi MIDI Note' : 'Add MIDI Note'}
                         </button>
                         <button
                           className="tracks-add-menu__item"
@@ -6042,44 +7545,6 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <div className="track-header-row track-header-row--cue">
-                <div className="track-cue-controls">
-                  <span className="timeline-controls__label">Cue</span>
-                  <div className="timeline-controls__buttons timeline-controls__buttons--cue">
-                    <button
-                      className="btn btn--unit"
-                      onClick={() => handleCueStep(-1)}
-                      disabled={!project.cues?.length}
-                      title="Jump to previous cue"
-                    >
-                      {'<'}
-                    </button>
-                    <button
-                      className="btn btn--unit"
-                      onClick={() => handleCueStep(1)}
-                      disabled={!project.cues?.length}
-                      title="Jump to next cue"
-                    >
-                      {'>'}
-                    </button>
-                    <button
-                      className="btn btn--unit"
-                      onClick={handleCueAddAtPlayhead}
-                      title="Add cue at playhead"
-                    >
-                      +
-                    </button>
-                    <button
-                      className="btn btn--unit"
-                      onClick={handleCueDeleteAtPlayhead}
-                      disabled={!project.cues?.length}
-                      title="Delete cue at playhead"
-                    >
-                      -
-                    </button>
-                  </div>
-                </div>
-              </div>
             </div>
           </aside>
           <div ref={timelineWidthHostRef} className="timeline-header-wrap">
@@ -6095,6 +7560,11 @@ export default function App() {
               onCueAdd={handleCueAdd}
               onCueMove={handleCueMove}
               onCueDelete={handleCueDelete}
+              loopEnabled={Boolean(project.view.loopEnabled)}
+              loopStart={Number(project.view.loopStart) || 0}
+              loopEnd={Number(project.view.loopEnd) || 0}
+              onLoopRangeChange={handleLoopRangeChange}
+              onLoopEdit={handleOpenLoopRangeEditor}
             />
           </div>
 
@@ -6129,7 +7599,7 @@ export default function App() {
                         setDropTarget(null);
                         event.dataTransfer.effectAllowed = 'move';
                         event.dataTransfer.setData('text/plain', track.id);
-                        event.dataTransfer.setData('application/x-osc-daw-track-ids', JSON.stringify(groupIds));
+                        event.dataTransfer.setData('application/x-osconductor-track-ids', JSON.stringify(groupIds));
                       }}
                       onDragOver={(event) => {
                         if (!dragTrackId) return;
@@ -6146,7 +7616,7 @@ export default function App() {
                         event.preventDefault();
                         let sourceIds = dragTrackIds;
                         if (!sourceIds.length) {
-                          const rawIds = event.dataTransfer.getData('application/x-osc-daw-track-ids');
+                          const rawIds = event.dataTransfer.getData('application/x-osconductor-track-ids');
                           if (rawIds) {
                             try {
                               const parsed = JSON.parse(rawIds);
@@ -6234,7 +7704,11 @@ export default function App() {
                               <>
                                 <span>OSC Track</span>
                                 <span>{track.min} to {track.max}</span>
-                                <span className="track-row__osc">{track.oscAddress}</span>
+                                <span className="track-row__osc">
+                                  {track.oscAddress}
+                                  {' · '}
+                                  {oscOutputLabelMap.get(track.oscOutputId) || oscOutputLabelMap.get(defaultOscOutput.id)}
+                                </span>
                               </>
                             ) : (
                               <>
@@ -6243,16 +7717,74 @@ export default function App() {
                               </>
                             )
                           )}
+                          {track.kind === 'osc-array' && (
+                            trackInfoDensity === 'full' ? (
+                              <>
+                                <span>OSC Array Track</span>
+                                <span>{`Values ${clamp(Math.round(Number(track.oscArray?.valueCount) || 5), 1, 20)} | ${Number(track.min ?? 0).toFixed(2)} to ${Number(track.max ?? 1).toFixed(2)}`}</span>
+                                <span className="track-row__osc">
+                                  {track.oscAddress}
+                                  {' · '}
+                                  {oscOutputLabelMap.get(track.oscOutputId) || oscOutputLabelMap.get(defaultOscOutput.id)}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span>OSC Array Track</span>
+                                <span>{`Values ${clamp(Math.round(Number(track.oscArray?.valueCount) || 5), 1, 20)}`}</span>
+                              </>
+                            )
+                          )}
+                          {track.kind === 'osc-flag' && (
+                            trackInfoDensity === 'full' ? (
+                              <>
+                                <span>OSC Flag Track</span>
+                                <span className="track-row__osc">
+                                  {track.oscAddress}
+                                  {' · '}
+                                  {oscOutputLabelMap.get(track.oscOutputId) || oscOutputLabelMap.get(defaultOscOutput.id)}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span>OSC Flag Track</span>
+                              </>
+                            )
+                          )}
+                          {track.kind === 'osc-color' && (
+                            trackInfoDensity === 'full' ? (
+                              <>
+                                <span>OSC Color Track</span>
+                                <span>
+                                  {(track.oscColor?.fixtureType === 'rgbw' ? 'RGBW' : 'RGB')}
+                                  {' '}
+                                  {(track.oscColor?.outputRange === 'unit' ? '0-1' : '0-255')}
+                                </span>
+                                <span className="track-row__osc">
+                                  {track.oscAddress}
+                                  {' · '}
+                                  {oscOutputLabelMap.get(track.oscOutputId) || oscOutputLabelMap.get(defaultOscOutput.id)}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span>OSC Color Track</span>
+                                <span>
+                                  {(track.oscColor?.fixtureType === 'rgbw' ? 'RGBW' : 'RGB')}
+                                  {' '}
+                                  {(track.oscColor?.outputRange === 'unit' ? '0-1' : '0-255')}
+                                </span>
+                              </>
+                            )
+                          )}
                           {track.kind === 'midi' && (
                             trackInfoDensity === 'full' ? (
                               <>
-                                <span>MIDI Track</span>
+                                <span>MIDI CC Track</span>
                                 <span>
                                   Ch {Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1)))}
-                                  {' '}
-                                  {track.midi?.mode === 'note'
-                                    ? `Note ${Math.max(0, Math.min(127, Math.round(Number(track.midi?.note) || 60)))}`
-                                    : `CC ${Math.max(0, Math.min(127, Math.round(Number(track.midi?.controlNumber) || 1)))}`}
+                                  {' · '}
+                                  CC {Math.max(0, Math.min(127, Math.round(Number(track.midi?.controlNumber) || 1)))}
                                 </span>
                                 <span className="track-row__osc">
                                   {midiOutputNameMap.get(getMidiTrackOutputId(track)) || getMidiTrackOutputId(track)}
@@ -6260,7 +7792,27 @@ export default function App() {
                               </>
                             ) : (
                               <>
-                                <span>MIDI Track</span>
+                                <span>MIDI CC Track</span>
+                                <span>
+                                  Ch {Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1)))}
+                                </span>
+                              </>
+                            )
+                          )}
+                          {track.kind === 'midi-note' && (
+                            trackInfoDensity === 'full' ? (
+                              <>
+                                <span>MIDI Note Track</span>
+                                <span>
+                                  Ch {Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1)))}
+                                </span>
+                                <span className="track-row__osc">
+                                  {midiOutputNameMap.get(getMidiTrackOutputId(track)) || getMidiTrackOutputId(track)}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span>MIDI Note Track</span>
                                 <span>
                                   Ch {Math.max(1, Math.min(16, Math.round(Number(track.midi?.channel) || 1)))}
                                 </span>
@@ -6344,11 +7896,19 @@ export default function App() {
                             track.kind === 'audio'
                               ? 'Solo audio track'
                               : track.kind === 'midi'
-                                ? 'Solo MIDI track output'
+                                ? 'Solo MIDI CC track output'
+                                : track.kind === 'midi-note'
+                                  ? 'Solo MIDI Note track output'
                                 : track.kind === 'dmx'
                                   ? 'Solo DMX track output'
                                 : track.kind === 'dmx-color'
                                   ? 'Solo DMX Color track output'
+                                : track.kind === 'osc-color'
+                                  ? 'Solo OSC Color track output'
+                                : track.kind === 'osc-array'
+                                  ? 'Solo OSC Array track output'
+                                : track.kind === 'osc-flag'
+                                  ? 'Solo OSC Flag track output'
                                 : 'Solo OSC track output'
                           }
                         >
@@ -6364,11 +7924,19 @@ export default function App() {
                             track.kind === 'audio'
                               ? 'Mute audio track'
                               : track.kind === 'midi'
-                                ? 'Mute MIDI track output'
+                                ? 'Mute MIDI CC track output'
+                                : track.kind === 'midi-note'
+                                  ? 'Mute MIDI Note track output'
                                 : track.kind === 'dmx'
                                   ? 'Mute DMX track output'
                                 : track.kind === 'dmx-color'
                                   ? 'Mute DMX Color track output'
+                                : track.kind === 'osc-color'
+                                  ? 'Mute OSC Color track output'
+                                : track.kind === 'osc-array'
+                                  ? 'Mute OSC Array track output'
+                                : track.kind === 'osc-flag'
+                                  ? 'Mute OSC Flag track output'
                                 : 'Mute OSC track output'
                           }
                         >
@@ -6446,11 +8014,17 @@ export default function App() {
           <InspectorPanel
             key={selectedTrack ? `${selectedTrack.id}-${selectedTrack.kind}` : 'inspector-empty'}
             track={selectedTrack}
+            selectedNode={selectedInspectorNode}
             nameFocusToken={nameFocusToken}
             midiOutputOptions={midiOutputOptions}
+            oscOutputOptions={oscOutputOptions}
             virtualMidiOutputId={VIRTUAL_MIDI_OUTPUT_ID}
             virtualMidiOutputName={VIRTUAL_MIDI_OUTPUT_NAME}
             onPatch={handlePatchTrack}
+            onPatchNode={(nodeId, patch) => {
+              if (!selectedTrack || !nodeId) return;
+              handlePatchSingleNode(selectedTrack.id, nodeId, patch);
+            }}
             onOpenAudioChannelMap={openAudioChannelMapDialog}
             onNameEnterNext={handleNameEnterNext}
             onAudioFile={(file) => {
@@ -6460,6 +8034,19 @@ export default function App() {
             onAddNode={() => {
               if (!selectedTrack) return;
               const t = clamp(playhead, 0, project.view.length);
+              if (selectedTrack.kind === 'osc-flag') {
+                handleAddNode(selectedTrack.id, { t, v: 1, d: 1, y: 0.5, curve: 'linear' });
+                return;
+              }
+              if (selectedTrack.kind === 'osc-array') {
+                const arr = sampleOscArrayTrackValues(selectedTrack, t);
+                handleAddNode(selectedTrack.id, { t, v: arr[0] ?? selectedTrack.default ?? 0, arr, curve: 'linear' });
+                return;
+              }
+              if (selectedTrack.kind === 'midi-note') {
+                handleAddNode(selectedTrack.id, { t, v: 60, d: 0.5, curve: 'linear' });
+                return;
+              }
               const v = sampleTrackValue(selectedTrack, t);
               handleAddNode(selectedTrack.id, { t, v, curve: 'linear' });
             }}

@@ -8,6 +8,8 @@ const parseNumber = (value, fallback) => {
 
 export default function InspectorPanel({
   track,
+  selectedNode = null,
+  onPatchNode,
   onPatch,
   onAddNode,
   onAudioFile,
@@ -15,12 +17,14 @@ export default function InspectorPanel({
   onNameEnterNext,
   nameFocusToken,
   midiOutputOptions = [],
+  oscOutputOptions = [],
   virtualMidiOutputId = 'virtual-midi-out',
-  virtualMidiOutputName = 'OSC DAW MIDI OUT',
+  virtualMidiOutputName = 'OSConductor MIDI OUT',
 }) {
   const nameInputRef = useRef(null);
   const lastHandledNameFocusTokenRef = useRef(nameFocusToken);
   const safeMidiOutputs = Array.isArray(midiOutputOptions) ? midiOutputOptions : [];
+  const safeOscOutputs = Array.isArray(oscOutputOptions) ? oscOutputOptions : [];
 
   useEffect(() => {
     if (!Number.isFinite(nameFocusToken) || nameFocusToken <= 0) return;
@@ -65,7 +69,7 @@ export default function InspectorPanel({
               }}
             />
           </div>
-          {track.kind === 'osc' && (
+          {(track.kind === 'osc' || track.kind === 'osc-array') && (
             <div className="field-grid">
               <div className="field">
                 <label>Min</label>
@@ -87,6 +91,42 @@ export default function InspectorPanel({
                   onChange={(event) => onPatch({ max: parseNumber(event.target.value, 1) })}
                 />
               </div>
+            </div>
+          )}
+          {(track.kind === 'osc' || track.kind === 'osc-array') && (
+            <div className="field">
+              <label>Value Type</label>
+              <select
+                className="input"
+                value={track.oscValueType === 'int' ? 'int' : 'float'}
+                onChange={(event) =>
+                  onPatch({
+                    oscValueType: event.target.value === 'int' ? 'int' : 'float',
+                  })}
+              >
+                <option value="int">Integer</option>
+                <option value="float">Float (0.00)</option>
+              </select>
+            </div>
+          )}
+          {(track.kind === 'osc' || track.kind === 'osc-array' || track.kind === 'osc-color' || track.kind === 'osc-flag') && (
+            <div className="field">
+              <label>OSC Output</label>
+              <select
+                className="input"
+                value={
+                  typeof track.oscOutputId === 'string' && track.oscOutputId
+                    ? track.oscOutputId
+                    : (safeOscOutputs[0]?.id || '')
+                }
+                onChange={(event) => onPatch({ oscOutputId: event.target.value })}
+              >
+                {safeOscOutputs.map((output) => (
+                  <option key={output.id} value={output.id}>
+                    {output.label || `${output.name} (${output.host}:${output.port})`}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
         </div>
@@ -145,8 +185,8 @@ export default function InspectorPanel({
             </div>
           </div>
         ) : track.kind === 'midi' ? (
-          <div className="inspector__section" key="midi-inspector">
-            <div className="inspector__title">MIDI</div>
+          <div className="inspector__section" key="midi-cc-inspector">
+            <div className="inspector__title">MIDI CC</div>
             <div className="field">
               <label>MIDI Out Port</label>
               <select
@@ -174,7 +214,6 @@ export default function InspectorPanel({
                 <label>Channel</label>
                 <NumberInput
                   className="input"
-                 
                   min="1"
                   max="16"
                   step="1"
@@ -186,57 +225,9 @@ export default function InspectorPanel({
                 />
               </div>
               <div className="field">
-                <label>Type</label>
-                <select
-                  className="input"
-                  value={track.midi?.mode === 'note' ? 'note' : 'cc'}
-                  onChange={(event) =>
-                    onPatch({
-                      midi: { mode: event.target.value === 'note' ? 'note' : 'cc' },
-                    })}
-                >
-                  <option value="cc">Control Change (CC)</option>
-                  <option value="note">Note On/Off</option>
-                </select>
-              </div>
-            </div>
-            {track.midi?.mode === 'note' ? (
-              <div className="field-grid">
-                <div className="field">
-                  <label>Note</label>
-                  <NumberInput
-                    className="input"
-                    min="0"
-                    max="127"
-                    step="1"
-                    value={Number.isFinite(track.midi?.note) ? track.midi.note : 60}
-                    onChange={(event) =>
-                      onPatch({
-                        midi: { note: parseNumber(event.target.value, 60) },
-                      })}
-                  />
-                </div>
-                <div className="field">
-                  <label>Velocity</label>
-                  <NumberInput
-                    className="input"
-                    min="0"
-                    max="127"
-                    step="1"
-                    value={Number.isFinite(track.midi?.velocity) ? track.midi.velocity : 100}
-                    onChange={(event) =>
-                      onPatch({
-                        midi: { velocity: parseNumber(event.target.value, 100) },
-                      })}
-                  />
-                </div>
-              </div>
-            ) : (
-              <div className="field">
-                <label>Control Number</label>
+                <label>CC</label>
                 <NumberInput
                   className="input"
-                 
                   min="0"
                   max="127"
                   step="1"
@@ -247,11 +238,58 @@ export default function InspectorPanel({
                     })}
                 />
               </div>
-            )}
+            </div>
             <div className="field__hint">
-              {track.midi?.mode === 'note'
-                ? 'Nodes use 0/1 gate. >= 0.5 sends Note On, < 0.5 sends Note Off.'
-                : 'Node values send MIDI CC values (0-127).'}
+              Node values send MIDI CC values (0-127).
+            </div>
+            <div className="inspector__row">
+              <span>Nodes</span>
+              <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
+            </div>
+          </div>
+        ) : track.kind === 'midi-note' ? (
+          <div className="inspector__section" key="midi-note-inspector">
+            <div className="inspector__title">MIDI Note</div>
+            <div className="field">
+              <label>MIDI Out Port</label>
+              <select
+                className="input"
+                value={typeof track.midi?.outputId === 'string' && track.midi.outputId
+                  ? track.midi.outputId
+                  : virtualMidiOutputId}
+                onChange={(event) =>
+                  onPatch({
+                    midi: { outputId: event.target.value },
+                  })}
+              >
+                <option value={virtualMidiOutputId}>{virtualMidiOutputName}</option>
+                {safeMidiOutputs
+                  .filter((device) => device.id !== virtualMidiOutputId)
+                  .map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="field-grid">
+              <div className="field">
+                <label>Channel</label>
+                <NumberInput
+                  className="input"
+                  min="1"
+                  max="16"
+                  step="1"
+                  value={Number.isFinite(track.midi?.channel) ? track.midi.channel : 1}
+                  onChange={(event) =>
+                    onPatch({
+                      midi: { channel: parseNumber(event.target.value, 1) },
+                    })}
+                />
+              </div>
+            </div>
+            <div className="field__hint">
+              Drag note blocks to set pitch/time. Double-click to edit time, note and length. Velocity uses track default.
             </div>
             <div className="inspector__row">
               <span>Nodes</span>
@@ -385,7 +423,7 @@ export default function InspectorPanel({
                 <input
                   className="input"
                   type="color"
-                  value={typeof track.dmxColor?.gradientFrom === 'string' ? track.dmxColor.gradientFrom : '#ff0000'}
+                  value={typeof track.dmxColor?.gradientFrom === 'string' ? track.dmxColor.gradientFrom : '#000000'}
                   onChange={(event) =>
                     onPatch({
                       dmxColor: { gradientFrom: event.target.value },
@@ -397,7 +435,7 @@ export default function InspectorPanel({
                 <input
                   className="input"
                   type="color"
-                  value={typeof track.dmxColor?.gradientTo === 'string' ? track.dmxColor.gradientTo : '#0000ff'}
+                  value={typeof track.dmxColor?.gradientTo === 'string' ? track.dmxColor.gradientTo : '#000000'}
                   onChange={(event) =>
                     onPatch({
                       dmxColor: { gradientTo: event.target.value },
@@ -495,6 +533,152 @@ export default function InspectorPanel({
             <div className="field__hint">
               Nodes (0-255) drive position on gradient and output DMX color channels.
             </div>
+            <div className="inspector__row">
+              <span>Nodes</span>
+              <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
+            </div>
+          </div>
+        ) : track.kind === 'osc-color' ? (
+          <div className="inspector__section" key="osc-color-inspector">
+            <div className="inspector__title">OSC Color</div>
+            <div className="field">
+              <label>OSC Address</label>
+              <input
+                className="input input--mono"
+                value={track.oscAddress ?? ''}
+                onChange={(event) => onPatch({ oscAddress: event.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label>Fixture</label>
+              <select
+                className="input"
+                value={track.oscColor?.fixtureType === 'rgbw' ? 'rgbw' : 'rgb'}
+                onChange={(event) =>
+                  onPatch({
+                    oscColor: {
+                      fixtureType: event.target.value === 'rgbw' ? 'rgbw' : 'rgb',
+                    },
+                  })}
+              >
+                <option value="rgb">RGB</option>
+                <option value="rgbw">RGBW</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Output Range</label>
+              <select
+                className="input"
+                value={track.oscColor?.outputRange === 'unit' ? 'unit' : 'byte'}
+                onChange={(event) =>
+                  onPatch({
+                    oscColor: {
+                      outputRange: event.target.value === 'unit' ? 'unit' : 'byte',
+                    },
+                  })}
+              >
+                <option value="byte">0 to 255</option>
+                <option value="unit">0 to 1</option>
+              </select>
+            </div>
+            <div className="field__hint">
+              Sends OSC array as /address r g b (or r g b w).
+            </div>
+            <div className="inspector__row">
+              <span>Nodes</span>
+              <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
+            </div>
+          </div>
+        ) : track.kind === 'osc-array' ? (
+          <div className="inspector__section" key="osc-array-inspector">
+            <div className="inspector__title">OSC Array</div>
+            <div className="field">
+              <label>OSC Address</label>
+              <input
+                className="input input--mono"
+                value={track.oscAddress ?? ''}
+                onChange={(event) => onPatch({ oscAddress: event.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label>Array Value Count</label>
+              <NumberInput
+                className="input"
+                min="1"
+                max="20"
+                step="1"
+                value={Number.isFinite(track.oscArray?.valueCount) ? track.oscArray.valueCount : 5}
+                onChange={(event) =>
+                  onPatch({
+                    oscArray: {
+                      valueCount: Math.min(
+                        20,
+                        Math.max(1, Math.round(parseNumber(event.target.value, 5)))
+                      ),
+                    },
+                  })}
+              />
+            </div>
+            <div className="field__hint">
+              Sends /address with array values at node time. Example: /track/1/send 0 0 0 0 0
+            </div>
+            <div className="inspector__row">
+              <span>Nodes</span>
+              <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>
+            </div>
+          </div>
+        ) : track.kind === 'osc-flag' ? (
+          <div className="inspector__section" key="osc-flag-inspector">
+            <div className="inspector__title">OSC Flag</div>
+            <div className="field">
+              <label>Node Address</label>
+              <input
+                className="input input--mono"
+                value={
+                  selectedNode
+                    ? (typeof selectedNode.a === 'string' ? selectedNode.a : (track.oscAddress ?? ''))
+                    : (track.oscAddress ?? '')
+                }
+                onChange={(event) => {
+                  if (selectedNode && onPatchNode) {
+                    onPatchNode(selectedNode.id, { a: event.target.value });
+                    return;
+                  }
+                  onPatch({ oscAddress: event.target.value });
+                }}
+              />
+            </div>
+            {selectedNode ? (
+              <>
+                <div className="field">
+                  <label>Trigger Time (sec)</label>
+                  <NumberInput
+                    className="input"
+                    min="0"
+                    step="0.01"
+                    value={Number.isFinite(selectedNode.d) ? selectedNode.d : 1}
+                    onChange={(event) => {
+                      if (!onPatchNode) return;
+                      onPatchNode(selectedNode.id, { d: Math.max(parseNumber(event.target.value, 1), 0) });
+                    }}
+                  />
+                </div>
+                <div className="field">
+                  <label>Trigger Value</label>
+                  <NumberInput
+                    className="input"
+                    step="0.01"
+                    value={Number.isFinite(selectedNode.v) ? selectedNode.v : 1}
+                    onChange={(event) => {
+                      if (!onPatchNode) return;
+                      onPatchNode(selectedNode.id, { v: parseNumber(event.target.value, 1) });
+                    }}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="field__hint">Select one flag node to edit trigger time and value.</div>
+            )}
             <div className="inspector__row">
               <span>Nodes</span>
               <span className="inspector__value">{Array.isArray(track.nodes) ? track.nodes.length : 0}</span>

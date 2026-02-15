@@ -78,13 +78,14 @@ export default function DmxColorEditor({
   onEditNode,
   onSelectionChange,
 }) {
+  const colorConfig = track.kind === 'osc-color' ? (track.oscColor || {}) : (track.dmxColor || {});
   const min = Number.isFinite(track.min) ? track.min : 0;
   const max = Number.isFinite(track.max) ? track.max : 255;
   const fallbackValue = Number.isFinite(track.default) ? track.default : 0;
-  const gradientFrom = typeof track.dmxColor?.gradientFrom === 'string' ? track.dmxColor.gradientFrom : '#ff0000';
-  const gradientTo = typeof track.dmxColor?.gradientTo === 'string' ? track.dmxColor.gradientTo : '#0000ff';
-  const fromRgb = useMemo(() => parseHexColor(gradientFrom, '#ff0000'), [gradientFrom]);
-  const toRgb = useMemo(() => parseHexColor(gradientTo, '#0000ff'), [gradientTo]);
+  const gradientFrom = typeof colorConfig?.gradientFrom === 'string' ? colorConfig.gradientFrom : '#000000';
+  const gradientTo = typeof colorConfig?.gradientTo === 'string' ? colorConfig.gradientTo : '#000000';
+  const fromRgb = useMemo(() => parseHexColor(gradientFrom, '#000000'), [gradientFrom]);
+  const toRgb = useMemo(() => parseHexColor(gradientTo, '#000000'), [gradientTo]);
   const sortedNodes = useMemo(
     () => (Array.isArray(track.nodes) ? [...track.nodes].sort((a, b) => a.t - b.t) : []),
     [track.nodes]
