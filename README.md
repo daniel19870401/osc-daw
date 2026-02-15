@@ -1,4 +1,4 @@
-# OSC Conductor
+# OSConductor
 
 本程式全部由 AI vibe coding 產出。
 
